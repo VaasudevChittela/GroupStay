@@ -1,10 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import { supabaseAnonKey, supabaseUrl } from './supabaseConfig';
 
-const supabaseUrl = 'https://alvzamtrqinzazpnrekp.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsdnphbXRycWluemF6cG5yZWtwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3NzEyNjgsImV4cCI6MjA5MzM0NzI2OH0.YfAZH1x8E07d4Wav_p2ZIk_vsdtoUSF96CTOA0JOcfk';
-
+/**
+ * Sessions are persisted so the app can prove who the user is on every request.
+ * Row level security keys off auth.uid(), so losing the session would mean
+ * losing all access — see supabase/migrations/0002_rbac.sql.
+ */
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
-    persistSession: false
-  }
+    storage: Platform.OS === 'web' ? undefined : AsyncStorage,
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: false,
+  },
 });

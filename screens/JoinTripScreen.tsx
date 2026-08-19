@@ -1,6 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert } from '../lib/alert';
 import { supabase } from '../lib/supabase';
 
 export default function JoinTripScreen() {

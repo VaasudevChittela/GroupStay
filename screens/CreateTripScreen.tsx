@@ -1,5 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
-import { Alert, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert } from '../lib/alert';
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 

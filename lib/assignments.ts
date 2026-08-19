@@ -1,34 +1,34 @@
 export type Guest = {
-  id: number;
+  id: string;
   school: string;
   is_chaperone: boolean;
-  roommate_request_id?: number | null;
+  roommate_request_id?: string | null;
 };
 
 export type Room = {
-  id: number;
+  id: string;
   capacity: number;
   school: string;
 };
 
 export type Assignment = {
-  guest_id: number;
-  room_id: number;
+  guest_id: string;
+  room_id: string;
 };
 
 export type AutoAssignResult = {
   assignments: Assignment[];
-  unassignedGuestIds: number[];
+  unassignedGuestIds: string[];
 };
 
 export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResult {
   const assignments: Assignment[] = [];
-  const unassignedGuestIds = new Set<number>(guests.map((guest) => guest.id));
+  const unassignedGuestIds = new Set<string>(guests.map((guest) => guest.id));
 
   type RoomState = Room & {
     occupants: number;
     hasChaperone: boolean;
-    guests: number[];
+    guests: string[];
   };
 
   const roomStates: RoomState[] = rooms.map((room) => ({
@@ -78,7 +78,7 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
     unassignedGuestIds.delete(guestB.id);
   };
 
-  const guestById = new Map<number, Guest>(guests.map((guest) => [guest.id, guest]));
+  const guestById = new Map<string, Guest>(guests.map((guest) => [guest.id, guest]));
 
   const chaperones = guests.filter((guest) => guest.is_chaperone);
   for (const guest of chaperones) {
@@ -113,7 +113,7 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
       continue;
     }
 
-    const pairKey = [guest.id, requestedGuest.id].sort((a, b) => a - b).join('-');
+    const pairKey = [guest.id, requestedGuest.id].sort().join('-');
     if (processedPairs.has(pairKey)) {
       continue;
     }
