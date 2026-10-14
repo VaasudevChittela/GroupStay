@@ -2,6 +2,7 @@ export type Guest = {
   id: number;
   school: string;
   is_chaperone: boolean;
+  gender?: string | null;
   roommate_request_id?: number | null;
 };
 
@@ -9,6 +10,7 @@ export type Room = {
   id: number;
   capacity: number;
   school: string;
+  gender?: string | null;
 };
 
 export type Assignment = {
@@ -21,21 +23,27 @@ export type AutoAssignResult = {
   unassignedGuestIds: number[];
 };
 
-export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResult {
+// Fills empty beds for guests without a room. Rooms students already picked (existing) are kept.
+// With separateChaperones, chaperones only share with chaperones and students only with students.
+export function autoAssignGuests(guests: Guest[], rooms: Room[], existing: Assignment[] = [], separateChaperones = false): AutoAssignResult {
   const assignments: Assignment[] = [];
   const unassignedGuestIds = new Set<number>(guests.map((guest) => guest.id));
 
   type RoomState = Room & {
     occupants: number;
     hasChaperone: boolean;
+    hasStudent: boolean;
     guests: number[];
+    genders: Set<string>;
   };
 
   const roomStates: RoomState[] = rooms.map((room) => ({
     ...room,
     occupants: 0,
     hasChaperone: false,
+    hasStudent: false,
     guests: [],
+    genders: new Set<string>(),
   }));
 
   const getAvailableRoom = (
@@ -44,9 +52,11 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
   ): RoomState | null => {
     const { requireEmptyChaperoneSlot = false, requiredCapacity = 1 } = options;
     const candidates = roomStates
-      .filter((room) => room.school === guest.school)
+      .filter((room) => room.school.trim().toLowerCase() === guest.school.trim().toLowerCase())
+      .filter((room) => (room.gender ? room.gender === guest.gender : !guest.gender || [...room.genders].every((g) => g === guest.gender)))
       .filter((room) => room.capacity - room.occupants >= requiredCapacity)
-      .filter((room) => (requireEmptyChaperoneSlot ? !room.hasChaperone : true));
+      .filter((room) => (requireEmptyChaperoneSlot && !separateChaperones ? !room.hasChaperone : true))
+      .filter((room) => (!separateChaperones ? true : guest.is_chaperone ? !room.hasStudent : !room.hasChaperone));
 
     if (candidates.length === 0) {
       return null;
@@ -58,8 +68,11 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
 
   const assignGuestToRoom = (guest: Guest, room: RoomState) => {
     room.occupants += 1;
+    if (guest.gender) room.genders.add(guest.gender);
     if (guest.is_chaperone) {
       room.hasChaperone = true;
+    } else {
+      room.hasStudent = true;
     }
     room.guests.push(guest.id);
     assignments.push({ guest_id: guest.id, room_id: room.id });
@@ -68,8 +81,13 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
 
   const assignGuestPairToRoom = (guestA: Guest, guestB: Guest, room: RoomState) => {
     room.occupants += 2;
+    if (guestA.gender) room.genders.add(guestA.gender);
+    if (guestB.gender) room.genders.add(guestB.gender);
     if (guestA.is_chaperone || guestB.is_chaperone) {
       room.hasChaperone = true;
+    }
+    if (!guestA.is_chaperone || !guestB.is_chaperone) {
+      room.hasStudent = true;
     }
     room.guests.push(guestA.id, guestB.id);
     assignments.push({ guest_id: guestA.id, room_id: room.id });
@@ -79,6 +97,12 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
   };
 
   const guestById = new Map<number, Guest>(guests.map((guest) => [guest.id, guest]));
+
+  for (const assignment of existing) {
+    const guest = guestById.get(assignment.guest_id);
+    const room = roomStates.find((r) => r.id === assignment.room_id);
+    if (guest && room && unassignedGuestIds.has(guest.id)) assignGuestToRoom(guest, room);
+  }
 
   const chaperones = guests.filter((guest) => guest.is_chaperone);
   for (const guest of chaperones) {
@@ -118,7 +142,7 @@ export function autoAssignGuests(guests: Guest[], rooms: Room[]): AutoAssignResu
       continue;
     }
 
-    if (guest.school !== requestedGuest.school) {
+    if (guest.school !== requestedGuest.school || (guest.gender ?? null) !== (requestedGuest.gender ?? null)) {
       continue;
     }
 

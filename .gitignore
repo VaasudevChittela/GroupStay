@@ -40,3 +40,9 @@ yarn-error.*
 /ios
 /android
 .env
+
+# web demo upload for Netlify
+groupstay-web.zip
+
+# local Claude Code settings
+.claude/

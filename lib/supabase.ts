@@ -1,10 +1,21 @@
-import { createClient } from '@supabase/supabase-js';
+import { Platform } from 'react-native';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabaseUrl, supabaseAnonKey } from './supabaseConfig';
+import { createDemoClient } from './demoBackend';
 
-const supabaseUrl = 'https://alvzamtrqinzazpnrekp.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsdnphbXRycWluemF6cG5yZWtwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3NzEyNjgsImV4cCI6MjA5MzM0NzI2OH0.YfAZH1x8E07d4Wav_p2ZIk_vsdtoUSF96CTOA0JOcfk';
+// Set EXPO_PUBLIC_DEMO_MODE=true in .env to run against the built-in demo backend
+// instead of Supabase. Restart `expo start` after changing it.
+export const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: false
-  }
-});
+export const supabase: SupabaseClient = isDemoMode
+  ? (createDemoClient() as unknown as SupabaseClient)
+  : createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        // Keep users logged in between app launches.
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+        storage: Platform.OS === 'web' ? undefined : AsyncStorage,
+      },
+    });

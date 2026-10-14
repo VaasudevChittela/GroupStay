@@ -1,117 +1,102 @@
 import { StatusBar } from 'expo-status-bar';
-import { Alert, StyleSheet, Text, TextInput, View, Pressable, TouchableOpacity } from 'react-native';
+import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase, isDemoMode } from '../lib/supabase';
+import { errorMessage, showAlert } from '../lib/alert';
+import { DEMO_ACCOUNTS } from '../lib/demoSeed';
+import { Role } from '../lib/types';
+import { colors, photos } from '../lib/theme';
+import { Hero, Page } from '../components/ui';
+import { styles } from '../styles';
 
 interface LoginScreenProps {
-  navigation: any;
+  roleHint?: Role | null;
+  // Set when the app was opened from a trip invite link.
+  joinCode?: string | null;
+  onSignup: () => void;
+  onBack: () => void;
 }
 
-export default function LoginScreen({ navigation }: LoginScreenProps) {
+export default function LoginScreen({ roleHint, joinCode, onSignup, onBack }: LoginScreenProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
     if (!email || !password) {
-      Alert.alert('Missing fields', 'Please enter both email and password.');
+      showAlert('Missing fields', 'Please enter both email and password.');
       return;
     }
 
     setLoading(true);
     const { error } = await supabase.auth.signInWithPassword({
-      email,
+      email: email.trim(),
       password,
     });
     setLoading(false);
 
     if (error) {
-      Alert.alert('Login failed', error.message);
-      return;
+      showAlert('Login failed', errorMessage(error));
     }
-
-    Alert.alert('Logged in', 'Welcome back to GroupStay!');
+    // On success App.tsx hears the auth change and opens the right dashboard.
   };
 
-  return (
-    <View style={styles.container}>
-      <Text style={styles.logo}>GroupStay</Text>
+  const who = roleHint === 'Hotel Staff' ? 'hotel staff' : roleHint === 'Advisor' ? 'an advisor' : roleHint ? `a ${roleHint.toLowerCase()}` : '';
 
-      <View style={styles.form}>
+  return (
+    <Page hero={<Hero image={photos.friends} eyebrow="GroupStay" title="Welcome back" subtitle={joinCode ? `Log in or sign up to join trip ${joinCode}.` : who ? `Log in as ${who}.` : 'Log in to your trip.'} onBack={onBack} height={260} />}>
+      <View style={styles.card}>
+        <Text style={styles.label}>Email</Text>
         <TextInput
           style={styles.input}
-          placeholder="Email"
-          placeholderTextColor="#9CA3AF"
+          placeholder="you@school.org"
+          placeholderTextColor={colors.faint}
           keyboardType="email-address"
           autoCapitalize="none"
           value={email}
           onChangeText={setEmail}
         />
+        <Text style={styles.label}>Password</Text>
         <TextInput
           style={styles.input}
           placeholder="Password"
-          placeholderTextColor="#9CA3AF"
+          placeholderTextColor={colors.faint}
           secureTextEntry
           value={password}
           onChangeText={setPassword}
+          onSubmitEditing={handleLogin}
         />
-        <Pressable style={styles.button} onPress={handleLogin} disabled={loading}>
+        <TouchableOpacity style={[styles.button, { marginTop: 4 }]} onPress={handleLogin} disabled={loading}>
           <Text style={styles.buttonText}>{loading ? 'Logging In...' : 'Log In'}</Text>
-        </Pressable>
-        <TouchableOpacity onPress={() => navigation.navigate('signup')}>
-          <Text style={styles.linkText}>Sign Up</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onSignup} style={{ alignItems: 'center', paddingVertical: 4 }}>
+          <Text style={styles.mutedText}>
+            No account? <Text style={styles.backText}>Sign Up</Text>
+          </Text>
         </TouchableOpacity>
       </View>
 
-      <StatusBar style="auto" />
-    </View>
+      {isDemoMode && (
+        <View style={[styles.card, { backgroundColor: colors.primarySoft, shadowOpacity: 0 }]}>
+          <Text style={styles.label}>Demo mode: tap an account to fill it in</Text>
+          <View style={styles.actionRow}>
+            {DEMO_ACCOUNTS.map((account) => (
+              <TouchableOpacity
+                key={account.email}
+                style={{ backgroundColor: colors.card, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 14 }}
+                onPress={() => {
+                  setEmail(account.email);
+                  setPassword(account.password);
+                }}
+              >
+                <Text style={{ color: colors.primaryDark, fontWeight: '700', fontSize: 13 }}>{account.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      )}
+
+      <StatusBar style="light" />
+    </Page>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    padding: 24,
-    justifyContent: 'center',
-  },
-  logo: {
-    fontSize: 36,
-    fontWeight: '700',
-    color: '#1A56A0',
-    textAlign: 'center',
-    marginBottom: 32,
-  },
-  form: {
-    width: '100%',
-    gap: 16,
-  },
-  input: {
-    backgroundColor: '#F9FAFB',
-    borderColor: '#E5E7EB',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: '#111827',
-  },
-  button: {
-    backgroundColor: '#1A56A0',
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  linkText: {
-    color: '#1A56A0',
-    textAlign: 'center',
-    fontSize: 15,
-    marginTop: 16,
-  },
-});

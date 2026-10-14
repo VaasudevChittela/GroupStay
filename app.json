@@ -25,6 +25,15 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "GroupStay shares your location with your trip advisors only when you turn on location sharing."
+        }
+      ],
+      "expo-font"
+    ]
   }
 }

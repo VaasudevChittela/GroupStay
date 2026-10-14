@@ -1,66 +1,86 @@
 import { StatusBar } from 'expo-status-bar';
-import { Alert, StyleSheet, Text, TextInput, View, Pressable, TouchableOpacity } from 'react-native';
+import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useState } from 'react';
 import { supabase } from '../lib/supabase';
-
-const roles = ['Advisor', 'Student', 'Hotel Staff'] as const;
-
-type Role = (typeof roles)[number];
+import { errorMessage, showAlert } from '../lib/alert';
+import { Gender, GENDERS, Role, ROLES } from '../lib/types';
+import { colors, photos } from '../lib/theme';
+import { Hero, OptionPicker, Page } from '../components/ui';
+import { styles } from '../styles';
 
 interface SignupScreenProps {
-  navigation: any;
+  roleHint?: Role | null;
+  onLogin: () => void;
 }
 
-export default function SignupScreen({ navigation }: SignupScreenProps) {
+export default function SignupScreen({ roleHint, onLogin }: SignupScreenProps) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<Role>('Student');
+  const [phone, setPhone] = useState('');
+  const [school, setSchool] = useState('');
+  const [gender, setGender] = useState<Gender | ''>('');
+  const [role, setRole] = useState<Role>(roleHint ?? 'Student');
   const [loading, setLoading] = useState(false);
 
+  const isStudentTier = role === 'Student' || role === 'Chaperone';
+  const needsSchool = role !== 'Hotel Staff' && role !== 'Parent';
+
   const handleSignUp = async () => {
-    if (!fullName || !email || !password) {
-      Alert.alert('Missing fields', 'Please fill in all fields to sign up.');
+    if (!fullName.trim() || !email.trim() || !password) {
+      showAlert('Missing fields', 'Please enter your name, email, and password.');
+      return;
+    }
+    if (needsSchool && !school.trim()) {
+      showAlert('Missing school', 'Please enter your school.');
+      return;
+    }
+    if (isStudentTier && (!phone.trim() || !gender)) {
+      showAlert('Missing fields', 'Students and chaperones need a phone number and gender for room matching.');
       return;
     }
 
     setLoading(true);
     const { data, error } = await supabase.auth.signUp({
-      email,
+      email: email.trim(),
       password,
       options: {
         data: {
-          full_name: fullName,
+          full_name: fullName.trim(),
           role,
+          phone: phone.trim(),
+          gender,
+          school: needsSchool ? school.trim() : '',
         },
       },
     });
     setLoading(false);
 
     if (error) {
-      Alert.alert('Sign up failed', error.message);
+      // A paused free-tier Supabase project answers with a 521 / network error here.
+      showAlert('Sign up failed', errorMessage(error));
       return;
     }
 
-    Alert.alert('Sign up successful', 'Please check your email for confirmation instructions.');
+    if (!data.session) {
+      showAlert('Check your email', 'Confirm your email address, then log in.');
+      onLogin();
+    }
+    // With a session, App.tsx opens the right dashboard automatically.
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.logo}>GroupStay</Text>
+    <Page hero={<Hero image={photos.friends} eyebrow="GroupStay" title="Create your account" subtitle="It takes a minute. Your advisor gives you the trip code." onBack={onLogin} backLabel="Log In" height={260} />}>
+      <View style={styles.card}>
+        <Text style={styles.label}>I am a…</Text>
+        <OptionPicker options={ROLES} value={role} onChange={setRole} />
 
-      <View style={styles.form}>
-        <TextInput
-          style={styles.input}
-          placeholder="Full Name"
-          placeholderTextColor="#9CA3AF"
-          value={fullName}
-          onChangeText={setFullName}
-        />
+        <Text style={styles.label}>About you</Text>
+        <TextInput style={styles.input} placeholder="Full name" placeholderTextColor={colors.faint} value={fullName} onChangeText={setFullName} />
         <TextInput
           style={styles.input}
           placeholder="Email"
-          placeholderTextColor="#9CA3AF"
+          placeholderTextColor={colors.faint}
           keyboardType="email-address"
           autoCapitalize="none"
           value={email}
@@ -68,111 +88,41 @@ export default function SignupScreen({ navigation }: SignupScreenProps) {
         />
         <TextInput
           style={styles.input}
-          placeholder="Password"
-          placeholderTextColor="#9CA3AF"
+          placeholder="Password (6+ characters)"
+          placeholderTextColor={colors.faint}
           secureTextEntry
           value={password}
           onChangeText={setPassword}
         />
+        <TextInput
+          style={styles.input}
+          placeholder={isStudentTier ? 'Phone number' : 'Phone number (optional)'}
+          placeholderTextColor={colors.faint}
+          keyboardType="phone-pad"
+          value={phone}
+          onChangeText={setPhone}
+        />
+        {needsSchool && (
+          <TextInput style={styles.input} placeholder="School" placeholderTextColor={colors.faint} value={school} onChangeText={setSchool} />
+        )}
+        {isStudentTier && (
+          <>
+            <Text style={styles.label}>Gender (used to match rooms)</Text>
+            <OptionPicker options={GENDERS} value={gender} onChange={setGender} />
+          </>
+        )}
 
-        <View style={styles.roleContainer}>
-          {roles.map((option) => {
-            const selected = option === role;
-            return (
-              <Pressable
-                key={option}
-                style={[styles.roleOption, selected && styles.roleOptionSelected]}
-                onPress={() => setRole(option)}
-              >
-                <Text style={[styles.roleText, selected && styles.roleTextSelected]}>{option}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <Pressable style={styles.button} onPress={handleSignUp} disabled={loading}>
-          <Text style={styles.buttonText}>{loading ? 'Signing Up...' : 'Sign Up'}</Text>
-        </Pressable>
-        <TouchableOpacity onPress={() => navigation.navigate('login')}>
-          <Text style={styles.linkText}>Back to Log In</Text>
+        <TouchableOpacity style={[styles.button, { marginTop: 4 }]} onPress={handleSignUp} disabled={loading}>
+          <Text style={styles.buttonText}>{loading ? 'Signing Up...' : 'Create Account'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onLogin} style={{ alignItems: 'center', paddingVertical: 4 }}>
+          <Text style={styles.mutedText}>
+            Already have an account? <Text style={styles.backText}>Log In</Text>
+          </Text>
         </TouchableOpacity>
       </View>
 
-      <StatusBar style="auto" />
-    </View>
+      <StatusBar style="light" />
+    </Page>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    padding: 24,
-    justifyContent: 'center',
-  },
-  logo: {
-    fontSize: 36,
-    fontWeight: '700',
-    color: '#1A56A0',
-    textAlign: 'center',
-    marginBottom: 32,
-  },
-  form: {
-    width: '100%',
-    gap: 16,
-  },
-  input: {
-    backgroundColor: '#F9FAFB',
-    borderColor: '#E5E7EB',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: '#111827',
-  },
-  roleContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  roleOption: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    backgroundColor: '#F9FAFB',
-    alignItems: 'center',
-  },
-  roleOptionSelected: {
-    backgroundColor: '#1A56A0',
-    borderColor: '#1A56A0',
-  },
-  roleText: {
-    color: '#334155',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  roleTextSelected: {
-    color: '#ffffff',
-  },
-  button: {
-    backgroundColor: '#1A56A0',
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  linkText: {
-    color: '#1A56A0',
-    textAlign: 'center',
-    fontSize: 15,
-    marginTop: 16,
-  },
-});

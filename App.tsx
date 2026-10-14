@@ -1,1967 +1,948 @@
 import { useEffect, useState } from 'react';
-import { Alert, Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TouchableWithoutFeedback, View, TextInput, TouchableOpacity } from 'react-native';
-import { supabase } from './lib/supabase';
+import { Platform, Text, View, TouchableOpacity } from 'react-native';
+import type { Session } from '@supabase/supabase-js';
+import { supabase, isDemoMode } from './lib/supabase';
+import { addDemoStudentsToTrip, resetDemoData } from './lib/demoBackend';
 import { autoAssignGuests } from './lib/assignments';
-import { supabaseUrl, supabaseAnonKey } from './lib/supabaseConfig';
+import { confirmAction, errorMessage, showAlert } from './lib/alert';
+import { countUnread, notify, notifyGuests } from './lib/notify';
+import { profileFromSession } from './lib/profile';
+import { applyLockDeadline, canUseRoom } from './lib/rooms';
+import { useSystemAlerts } from './lib/systemAlerts';
+import { exportManifestCsv, printManifest } from './lib/manifest';
+import { formatDateRange, formatDeadline, formatTime, stepTime, timeAgo } from './lib/format';
+import { Guest, GUEST_COLUMNS, GUEST_DETAILS_COLUMNS, GuestDetails, NotificationLink, Profile, Role, Room, ROOM_COLUMNS, Trip, TRIP_COLUMNS } from './lib/types';
+import { BackButton, Badge, Hero, IconName, Page, SmallButton, Tile } from './components/ui';
+import { Ionicons } from '@expo/vector-icons';
+import { appearance, colors, loadAppearance, onAppearanceChange, photos } from './lib/theme';
+import { takeJoinCodeFromUrl } from './lib/links';
+import ParentHome from './screens/ParentHome';
+import DisplaySettingsScreen from './screens/DisplaySettingsScreen';
+import AlertHost from './components/AlertHost';
+import { styles } from './styles';
 import LoginScreen from './screens/LoginScreen';
 import SignupScreen from './screens/SignupScreen';
+import CreateTripScreen from './screens/CreateTripScreen';
+import StudentHome from './screens/StudentHome';
+import StaffHome from './screens/StaffHome';
+import MessagesScreen from './screens/MessagesScreen';
+import NotificationsScreen from './screens/NotificationsScreen';
+import LocationsScreen from './screens/LocationsScreen';
+import RoomInventoryScreen from './screens/RoomInventoryScreen';
+import CheckInScreen from './screens/CheckInScreen';
+import AddStudentsScreen from './screens/AddStudentsScreen';
+import TripSettingsScreen from './screens/TripSettingsScreen';
+import ScheduleScreen from './screens/ScheduleScreen';
+import RoomChecksScreen from './screens/RoomChecksScreen';
+import RoomHistoryScreen from './screens/RoomHistoryScreen';
+import InviteScreen from './screens/InviteScreen';
+import { logRoomChanges } from './lib/history';
 
-type Screen = 'home' | 'advisor' | 'student' | 'staff' | 'login' | 'signup';
-type AssignmentCountMap = Map<number, number>;
-
-type GuestListItem = { id: number; legal_name: string; school: string; room_number?: string | null; room_type?: string | null; requested_roommate_id?: number | null };
-
-type ThreadType = { id: string; name: string; canPost: boolean };
-type MessageItem = { id: number; sender_name: string; sender_role: string; content: string; created_at: string };
-
-type RoomOption = { id: number; room_number: string; room_type: string; capacity: number; school: string; occupants?: number };
-type GuestInfo = { id: number; legal_name: string; school: string; arrival_window: string; is_chaperone: boolean; roommate_request_id?: number | null };
+type Screen = 'home' | 'login' | 'signup' | 'dashboard';
 type AssignmentItem = { guest_id: number; room_id: number };
-type RequestGuest = { id: number; legal_name: string; school: string; roommate_request_id: number | null };
 
-type TripInfo = { id: number; name: string; hotel_name: string; trip_code?: string };
+const ROLE_CARDS: Array<{ role: Role; title: string; text: string; icon: IconName; tint: string }> = [
+  { role: 'Advisor', title: "I'm an Advisor", text: 'Create trips, manage rooms, and send the hotel a rooming list.', icon: 'briefcase-outline', tint: colors.primary },
+  { role: 'Student', title: "I'm a Student", text: 'Join your trip with a code and pick a room with friends.', icon: 'school-outline', tint: '#7C3AED' },
+  { role: 'Chaperone', title: "I'm a Chaperone", text: 'Join the trip and keep an eye on your room roster.', icon: 'shield-checkmark-outline', tint: colors.success },
+  { role: 'Hotel Staff', title: "I'm Hotel Staff", text: 'Add room inventory, get manifests, and mark rooms ready.', icon: 'bed-outline', tint: '#DB2777' },
+  { role: 'Parent', title: "I'm a Parent", text: "Follow your student's trip and sign the permission slip.", icon: 'heart-outline', tint: '#0891B2' },
+];
 
-function HomeScreen({ onSelect }: { onSelect: (screen: Screen) => void }) {
+function HomeScreen({
+  profile,
+  onSelect,
+  onDashboard,
+  onLogout,
+  onOpenDisplay,
+}: {
+  profile: Profile | null;
+  onSelect: (role: Role) => void;
+  onDashboard: () => void;
+  onLogout: () => void;
+  onOpenDisplay: () => void;
+}) {
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>GroupStay</Text>
-      <Text style={styles.subtitle}>Hotel check-in for groups</Text>
-
-      <View style={styles.buttonsContainer}>
-        <TouchableOpacity style={styles.button} onPress={() => onSelect('advisor')}>
-          <Text style={styles.buttonText}>I'm an Advisor</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.button} onPress={() => onSelect('student')}>
-          <Text style={styles.buttonText}>I'm a Student</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.button} onPress={() => onSelect('staff')}>
-          <Text style={styles.buttonText}>I'm Hotel Staff</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-function AdvisorScreen({ onBack }: { onBack: () => void }) {
-  const [tripName, setTripName] = useState('');
-  const [hotelName, setHotelName] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [showGuestList, setShowGuestList] = useState(false);
-  const [showAssignmentManager, setShowAssignmentManager] = useState(false);
-  const [showRoomManager, setShowRoomManager] = useState(false);
-  const [showMessages, setShowMessages] = useState(false);
-  const [tripCreated, setTripCreated] = useState(false);
-  const [currentTrip, setCurrentTrip] = useState<{ id: number; name: string; hotel_name: string; trip_code: string } | null>(null);
-  const [roomNumber, setRoomNumber] = useState('');
-  const [roomCapacity, setRoomCapacity] = useState('1');
-  const [roomType, setRoomType] = useState<'Single' | 'Double' | 'Quad'>('Single');
-  const [roomSchool, setRoomSchool] = useState('');
-  const [rooms, setRooms] = useState<RoomOption[]>([]);
-  const [stats, setStats] = useState<{ totalGuests: number; assigned: number; unassigned: number; roomsAdded: number; hasAssignments: boolean } | null>(null);
-
-  const loadStats = async (tripId: number) => {
-    const [{ count: totalGuests }, { count: assigned }, { count: roomsAdded }] = await Promise.all([
-      supabase.from('guests').select('*', { count: 'exact', head: true }).eq('trip_id', tripId),
-      supabase.from('assignments').select('*', { count: 'exact', head: true }).eq('trip_id', tripId),
-      supabase.from('rooms').select('*', { count: 'exact', head: true }).eq('trip_id', tripId),
-    ]);
-    const unassigned = (totalGuests ?? 0) - (assigned ?? 0);
-    const hasAssignments = (assigned ?? 0) > 0;
-    setStats({ totalGuests: totalGuests ?? 0, assigned: assigned ?? 0, unassigned, roomsAdded: roomsAdded ?? 0, hasAssignments });
-  };
-
-  const createTripCode = () => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  };
-
-  const getToday = () => {
-    const date = new Date();
-    const year = date.getFullYear();
-    const month = `${date.getMonth() + 1}`.padStart(2, '0');
-    const day = `${date.getDate()}`.padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
-  const handleCreate = async () => {
-    if (!tripName || !hotelName) {
-      Alert.alert('Missing info', 'Please enter both trip and hotel names.');
-      return;
-    }
-
-    const tripCode = createTripCode();
-    const today = getToday();
-    setLoading(true);
-
-    const { data, error } = await supabase
-      .from('trips')
-      .insert([
-        {
-          name: tripName,
-          hotel_name: hotelName,
-          trip_code: tripCode,
-          status: 'draft',
-          check_in: today,
-          check_out: today,
-        },
-      ])
-      .select('id, name, hotel_name, trip_code')
-      .single();
-
-    setLoading(false);
-
-    if (error || !data) {
-      Alert.alert('Error', JSON.stringify(error ?? 'Unable to create trip.'));
-      return;
-    }
-
-    setCurrentTrip(data);
-    setRooms([]);
-    setTripCreated(true);
-    await loadStats(data.id);
-    Alert.alert('Trip Created!', `Share this code with your students: ${tripCode}`);
-    setTripName('');
-    setHotelName('');
-  };
-
-  const handleAddRoom = async () => {
-    if (!currentTrip) {
-      Alert.alert('Missing trip', 'Create a trip before adding rooms.');
-      return;
-    }
-    if (!roomNumber.trim() || !roomCapacity.trim() || !roomSchool.trim()) {
-      Alert.alert('Missing info', 'Please enter room number, capacity, and school.');
-      return;
-    }
-
-    const capacity = Number(roomCapacity);
-    if (!capacity || capacity <= 0) {
-      Alert.alert('Invalid capacity', 'Capacity must be a positive number.');
-      return;
-    }
-
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('rooms')
-      .insert([
-        {
-          trip_id: currentTrip.id,
-          room_number: roomNumber.trim(),
-          capacity,
-          room_type: roomType,
-          school: roomSchool.trim(),
-        },
-      ])
-      .select('id, room_number, capacity, room_type, school')
-      .single();
-    setLoading(false);
-
-    if (error || !data) {
-      Alert.alert('Error', JSON.stringify(error ?? 'Unable to add room.'));
-      return;
-    }
-
-    setRooms((prev) => [...prev, data]);
-    setRoomNumber('');
-    setRoomCapacity('1');
-    setRoomType('Single');
-    setRoomSchool('');
-    if (currentTrip) {
-      await loadStats(currentTrip.id);
-    }
-  };
-
-  if (showGuestList) {
-    return <AdvisorGuestListScreen onBack={() => setShowGuestList(false)} tripId={currentTrip?.id ?? null} />;
-  }
-
-  if (showAssignmentManager) {
-    return <AdvisorAssignmentScreen onBack={() => setShowAssignmentManager(false)} tripId={currentTrip?.id ?? null} />;
-  }
-
-  if (showRoomManager && currentTrip) {
-    return (
-      <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-            <TouchableOpacity style={styles.backButton} onPress={() => setShowRoomManager(false)}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>Manage Rooms</Text>
-            <Text style={styles.subtitle}>{`Trip: ${currentTrip.name}`}</Text>
-            <Text style={styles.subtitle}>{`Hotel: ${currentTrip.hotel_name}`}</Text>
-            <Text style={styles.subtitle}>{`Code: ${currentTrip.trip_code}`}</Text>
-
-            <TextInput
-              style={styles.input}
-              placeholder="Room Number"
-              placeholderTextColor="#94A3B8"
-              value={roomNumber}
-              onChangeText={setRoomNumber}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="Capacity"
-              placeholderTextColor="#94A3B8"
-              keyboardType="numeric"
-              value={roomCapacity}
-              onChangeText={setRoomCapacity}
-            />
-            <Text style={styles.subtitle}>Room Type</Text>
-            <View style={styles.roomTypeRow}>
-              {['Single', 'Double', 'Quad'].map((type) => (
-                <TouchableOpacity
-                  key={type}
-                  style={roomType === type ? [styles.roomTypeButton, styles.roomTypeSelected] : styles.roomTypeButton}
-                  onPress={() => setRoomType(type as 'Single' | 'Double' | 'Quad')}
-                >
-                  <Text style={roomType === type ? [styles.roomTypeText, styles.roomTypeSelectedText] : styles.roomTypeText}>
-                    {type}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <TextInput
-              style={styles.input}
-              placeholder="School"
-              placeholderTextColor="#94A3B8"
-              value={roomSchool}
-              onChangeText={setRoomSchool}
-            />
-            <TouchableOpacity style={styles.button} onPress={handleAddRoom} disabled={loading}>
-              <Text style={styles.buttonText}>{loading ? 'Saving...' : 'Add Room'}</Text>
-            </TouchableOpacity>
-            {rooms.length > 0 && (
-              <View style={styles.roomList}>
-                <Text style={styles.sectionTitle}>Rooms Added</Text>
-                {rooms.map((room) => (
-                  <View key={room.id} style={styles.roomRow}>
-                    <Text style={styles.guestName}>{room.room_number}</Text>
-                    <Text style={styles.normalText}>{`${room.school} • ${room.room_type} • Capacity ${room.capacity}`}</Text>
-                  </View>
-                ))}
+    <Page
+      hero={
+        <Hero image={photos.lobby} eyebrow="Group travel, sorted" title="GroupStay" subtitle="Rooming lists, room picks, and check-in for school trips, all in one place." height={340}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 16 }}>
+            {['Pick rooms together', 'Locked rooming lists', 'Room-ready alerts'].map((chip) => (
+              <View key={chip} style={{ backgroundColor: 'rgba(255,255,255,0.16)', borderRadius: 999, paddingVertical: 6, paddingHorizontal: 12 }}>
+                <Text style={{ color: colors.white, fontSize: 13, fontWeight: '600' }}>{chip}</Text>
               </View>
-            )}
-          </ScrollView>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
-    );
-  }
-
-  if (showMessages) {
-    return <MessagesScreen onBack={() => setShowMessages(false)} role="advisor" tripId={currentTrip!.id} />;
-  }
-
-  if (tripCreated && currentTrip) {
-    return (
-      <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-        <TouchableOpacity style={styles.backButton} onPress={onBack}>
-          <Text style={styles.backText}>Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>{currentTrip.name}</Text>
-        <Text style={styles.subtitle}>{currentTrip.hotel_name}</Text>
-
-        {stats && (
-          <View style={styles.statsContainer}>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{stats.totalGuests}</Text>
-              <Text style={styles.statLabel}>Total Guests</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{stats.assigned}</Text>
-              <Text style={styles.statLabel}>Assigned</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{stats.unassigned}</Text>
-              <Text style={styles.statLabel}>Unassigned</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{stats.roomsAdded}</Text>
-              <Text style={styles.statLabel}>Rooms Added</Text>
-            </View>
+            ))}
           </View>
-        )}
-
-        <View style={styles.buttonsGrid}>
-          <TouchableOpacity style={styles.gridButton} onPress={() => setShowRoomManager(true)}>
-            <Text style={styles.gridButtonText}>Manage Rooms</Text>
+        </Hero>
+      }
+    >
+      {profile ? (
+        <View style={styles.card}>
+          <Text style={styles.label}>Welcome back</Text>
+          <Text style={styles.cardTitle}>{profile.full_name || profile.email}</Text>
+          <Text style={[styles.mutedText, { marginBottom: 14 }]}>{`Signed in as ${profile.role ?? 'no role'}`}</Text>
+          <TouchableOpacity style={styles.button} onPress={onDashboard}>
+            <Text style={styles.buttonText}>Go to My Dashboard</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.gridButton} onPress={() => setShowGuestList(true)}>
-            <Text style={styles.gridButtonText}>View Guests</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.gridButton} onPress={() => setShowAssignmentManager(true)}>
-            <Text style={styles.gridButtonText}>Assign Rooms</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.gridButton} onPress={() => setShowMessages(true)}>
-            <Text style={styles.gridButtonText}>Messages</Text>
+          <TouchableOpacity style={[styles.secondaryButton, { marginBottom: 0 }]} onPress={onLogout}>
+            <Text style={styles.secondaryButtonText}>Log Out</Text>
           </TouchableOpacity>
         </View>
-
-        <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Trip Code', currentTrip.trip_code)}>
-          <Text style={styles.secondaryButtonText}>Share Trip Code</Text>
-        </TouchableOpacity>
-
-        {stats?.hasAssignments && (
-          <TouchableOpacity style={styles.button} onPress={async () => {
-            const { error } = await supabase
-              .from('trips')
-              .update({ locked_at: new Date().toISOString() })
-              .eq('id', currentTrip.id);
-            if (error) {
-              Alert.alert('Error', JSON.stringify(error));
-            } else {
-              Alert.alert('Locked', 'Trip assignments have been locked.');
-              await loadStats(currentTrip.id); // Refresh stats if needed
-            }
-          }}>
-            <Text style={styles.buttonText}>Lock Assignments</Text>
-          </TouchableOpacity>
-        )}
-      </ScrollView>
-    );
-  }
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-          <Text style={styles.title}>Create Trip</Text>
-          <Text style={styles.subtitle}>Enter trip details below.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Trip Name"
-            placeholderTextColor="#94A3B8"
-            value={tripName}
-            onChangeText={setTripName}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Hotel Name"
-            placeholderTextColor="#94A3B8"
-            value={hotelName}
-            onChangeText={setHotelName}
-          />
-          <TouchableOpacity style={styles.button} onPress={handleCreate} disabled={loading}>
-            <Text style={styles.buttonText}>{loading ? 'Creating...' : 'Create'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
-
-function AdvisorGuestListScreen({ onBack, tripId }: { onBack: () => void; tripId: number | null }) {
-  const [tripCode, setTripCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [tripInfo, setTripInfo] = useState<TripInfo | null>(null);
-  const [guests, setGuests] = useState<GuestInfo[]>([]);
-
-  const loadGuests = async (id: number) => {
-    setLoading(true);
-    const [{ data: trip, error: tripError }, { data: guestRows, error: guestError }] = await Promise.all([
-      supabase.from('trips').select('id, name, hotel_name').eq('id', id).single(),
-      supabase.from('guests').select('id, legal_name, school, arrival_window').eq('trip_id', id).order('legal_name', { ascending: true }),
-    ]);
-
-    setLoading(false);
-
-    if (tripError || guestError) {
-      Alert.alert('Error', JSON.stringify(tripError || guestError));
-      return;
-    }
-
-    if (!trip) {
-      Alert.alert('Trip not found', 'Trip not found');
-      return;
-    }
-
-    setTripInfo(trip);
-    setGuests((guestRows ?? []).map((guest) => ({
-      ...guest,
-      is_chaperone: false,
-      roommate_request_id: null,
-    })));
-  };
-
-  useEffect(() => {
-    if (tripId) {
-      loadGuests(tripId);
-    }
-  }, [tripId]);
-
-  const handleLoadGuests = async () => {
-    const code = tripCode.trim();
-    if (!code) {
-      Alert.alert('Missing code', 'Please enter a trip code.');
-      return;
-    }
-
-    setLoading(true);
-    const { data: trip, error: tripError } = await supabase
-      .from('trips')
-      .select('id, name, hotel_name')
-      .eq('trip_code', code)
-      .maybeSingle();
-
-    if (tripError) {
-      setLoading(false);
-      Alert.alert('Error', JSON.stringify(tripError));
-      return;
-    }
-
-    if (!trip) {
-      setLoading(false);
-      Alert.alert('Trip not found', 'Trip not found - check your code');
-      return;
-    }
-
-    await loadGuests(trip.id);
-  };
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.container}>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Guest List</Text>
-          {!tripId && (
-            <>
-              <Text style={styles.subtitle}>Enter a trip code to load guests.</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Trip Code"
-                placeholderTextColor="#94A3B8"
-                value={tripCode}
-                onChangeText={setTripCode}
-              />
-              <TouchableOpacity style={styles.button} onPress={handleLoadGuests} disabled={loading}>
-                <Text style={styles.buttonText}>{loading ? 'Loading...' : 'Load Guests'}</Text>
-              </TouchableOpacity>
-            </>
-          )}
-          {tripInfo ? (
-            <ScrollView style={styles.guestListContainer} contentContainerStyle={styles.guestListContent}>
-              <Text style={styles.subtitle}>{`Trip: ${tripInfo.name}`}</Text>
-              <Text style={styles.subtitle}>{`Hotel: ${tripInfo.hotel_name}`}</Text>
-              {guests.length === 0 ? (
-                <Text style={styles.normalText}>No guests have checked in yet.</Text>
-              ) : (
-                guests.map((guest) => (
-                  <View key={guest.id} style={styles.guestRow}>
-                    <Text style={styles.guestName}>{guest.legal_name}</Text>
-                    <Text style={styles.normalText}>{guest.school}</Text>
-                    <Text style={styles.normalText}>{guest.arrival_window}</Text>
-                  </View>
-                ))
-              )}
-            </ScrollView>
-          ) : null}
-        </View>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
-
-function AdvisorAssignmentScreen({ onBack, tripId }: { onBack: () => void; tripId: number | null }) {
-  const [tripCode, setTripCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [autoAssigning, setAutoAssigning] = useState(false);
-  const [tripInfo, setTripInfo] = useState<TripInfo | null>(null);
-  const [rooms, setRooms] = useState<RoomOption[]>([]);
-  const [guests, setGuests] = useState<GuestInfo[]>([]);
-  const [assignments, setAssignments] = useState<AssignmentItem[]>([]);
-  const [unassignedGuestIds, setUnassignedGuestIds] = useState<number[]>([]);
-
-  const calculateUnassigned = (updatedAssignments: Array<{ guest_id: number; room_id: number }>, guestRows: Array<{ id: number }>) => {
-    const assignedIds = new Set(updatedAssignments.map((assignment) => assignment.guest_id));
-    return guestRows.filter((guest) => !assignedIds.has(guest.id)).map((guest) => guest.id);
-  };
-
-  const loadTripData = async (id: number) => {
-    setLoading(true);
-    const [{ data: trip, error: tripError }, { data: roomRows, error: roomError }, { data: guestRows, error: guestError }, { data: assignmentRows, error: assignmentError }] = await Promise.all([
-      supabase.from('trips').select('id, name, hotel_name').eq('id', id).single(),
-      supabase.from('rooms').select('id, room_number, capacity, room_type, school').eq('trip_id', id).order('room_number', { ascending: true }),
-      supabase.from('guests').select('id, legal_name, school, arrival_window, is_chaperone, roommate_request_id').eq('trip_id', id).order('legal_name', { ascending: true }),
-      supabase.from('assignments').select('guest_id, room_id').eq('trip_id', id),
-    ]);
-
-    setLoading(false);
-
-    if (tripError || roomError || guestError || assignmentError) {
-      Alert.alert('Error', JSON.stringify(tripError || roomError || guestError || assignmentError));
-      return;
-    }
-
-    if (!trip) {
-      Alert.alert('Trip not found', 'Trip not found');
-      return;
-    }
-
-    const assignmentList = assignmentRows ?? [];
-    setTripInfo(trip);
-    setRooms(roomRows ?? []);
-    setGuests((guestRows ?? []).map((guest) => ({
-      ...guest,
-      is_chaperone: false,
-      roommate_request_id: null,
-    })));
-    setAssignments(assignmentList.map((assignment) => ({ guest_id: assignment.guest_id, room_id: assignment.room_id })));
-    setUnassignedGuestIds(calculateUnassigned(assignmentList, guestRows ?? []));
-  };
-
-  useEffect(() => {
-    if (tripId) {
-      loadTripData(tripId);
-    }
-  }, [tripId]);
-
-  const handleLoadAssignmentData = async () => {
-    const code = tripCode.trim();
-    if (!code) {
-      Alert.alert('Missing code', 'Please enter a trip code.');
-      return;
-    }
-
-    setLoading(true);
-    const { data: trip, error: tripError } = await supabase
-      .from('trips')
-      .select('id, name, hotel_name')
-      .eq('trip_code', code)
-      .maybeSingle();
-
-    if (tripError) {
-      setLoading(false);
-      Alert.alert('Error', JSON.stringify(tripError));
-      return;
-    }
-
-    if (!trip) {
-      setLoading(false);
-      Alert.alert('Trip not found', 'Trip not found - check your code');
-      return;
-    }
-
-    await loadTripData(trip.id);
-  };
-
-  const handleAutoAssign = () => {
-    if (!tripInfo) {
-      Alert.alert('No trip loaded', 'Load a trip before auto-assigning.');
-      return;
-    }
-
-    setAutoAssigning(true);
-    const result = autoAssignGuests(guests, rooms);
-    setAssignments(result.assignments);
-    setUnassignedGuestIds(result.unassignedGuestIds);
-    setAutoAssigning(false);
-  };
-
-  const handleSaveAssignments = async () => {
-    if (!tripInfo) {
-      Alert.alert('No trip loaded', 'Load a trip before saving assignments.');
-      return;
-    }
-
-    const payload = assignments.map((assignment) => ({
-      trip_id: tripInfo.id,
-      guest_id: assignment.guest_id,
-      room_id: assignment.room_id,
-    }));
-
-    const { error } = await supabase.from('assignments').upsert(payload, { onConflict: 'guest_id' });
-
-    if (error) {
-      Alert.alert('Error saving assignments', JSON.stringify(error));
-      return;
-    }
-
-    Alert.alert('Saved', 'Assignments saved successfully.');
-  };
-
-  const handleLockAssignments = async () => {
-    if (!tripInfo) {
-      Alert.alert('No trip loaded', 'Load a trip before locking assignments.');
-      return;
-    }
-
-    const { error } = await supabase
-      .from('trips')
-      .update({ locked_at: new Date().toISOString() })
-      .eq('id', tripInfo.id);
-
-    if (error) {
-      Alert.alert('Error locking assignments', JSON.stringify(error));
-      return;
-    }
-
-    Alert.alert('Locked', 'Trip assignments have been locked.');
-  };
-
-  const assignmentMap = new Map<number, Array<{ id: number; legal_name: string }>>();
-  assignments.forEach((assignment) => {
-    const guest = guests.find((g) => g.id === assignment.guest_id);
-    if (!guest) return;
-    const list = assignmentMap.get(assignment.room_id) ?? [];
-    list.push({ id: guest.id, legal_name: guest.legal_name });
-    assignmentMap.set(assignment.room_id, list);
-  });
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.contentContainer]}>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Assignment Manager</Text>
-      {!tripId && (
+      ) : (
         <>
-          <Text style={styles.subtitle}>Load a trip code to review rooms and guest assignments.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Trip Code"
-            placeholderTextColor="#94A3B8"
-            value={tripCode}
-            onChangeText={setTripCode}
-          />
-          <TouchableOpacity style={styles.button} onPress={handleLoadAssignmentData} disabled={loading}>
-            <Text style={styles.buttonText}>{loading ? 'Loading...' : 'Load Trip'}</Text>
-          </TouchableOpacity>
+          <Text style={styles.sectionTitle}>Who are you?</Text>
+          {ROLE_CARDS.map((card) => (
+            <TouchableOpacity key={card.role} style={[styles.card, { flexDirection: 'row', alignItems: 'center', gap: 14 }]} onPress={() => onSelect(card.role)} activeOpacity={0.85}>
+              <View style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: `${card.tint}18`, alignItems: 'center', justifyContent: 'center' }}>
+                <Ionicons name={card.icon} size={24} color={card.tint} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardTitle}>{card.title}</Text>
+                <Text style={[styles.mutedText, { marginBottom: 0 }]}>{card.text}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.faint} />
+            </TouchableOpacity>
+          ))}
         </>
       )}
 
-      {tripInfo ? (
-        <View style={styles.assignmentPanel}>
-          <Text style={styles.subtitle}>{`Trip: ${tripInfo.name}`}</Text>
-          <Text style={styles.subtitle}>{`Hotel: ${tripInfo.hotel_name}`}</Text>
-
-          <TouchableOpacity style={styles.button} onPress={handleAutoAssign} disabled={autoAssigning || rooms.length === 0 || guests.length === 0}>
-            <Text style={styles.buttonText}>{autoAssigning ? 'Assigning...' : 'Auto Assign Guests'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.button} onPress={handleSaveAssignments} disabled={assignments.length === 0}>
-            <Text style={styles.buttonText}>Save Assignments</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryButton} onPress={handleLockAssignments}>
-            <Text style={styles.secondaryButtonText}>Lock Assignments</Text>
-          </TouchableOpacity>
-
-          {rooms.length > 0 ? (
-            <View style={styles.roomList}>
-              <Text style={styles.sectionTitle}>Assignments by Room</Text>
-              {rooms.map((room) => (
-                <View key={room.id} style={styles.roomRow}>
-                  <Text style={styles.guestName}>{`${room.room_number} (${room.room_type})`}</Text>
-                  <Text style={styles.normalText}>{`${room.school} • Cap ${room.capacity}`}</Text>
-                  {assignmentMap.get(room.id)?.length ? (
-                    assignmentMap.get(room.id)?.map((guest) => (
-                      <Text key={guest.id} style={styles.normalText}>{`• ${guest.legal_name}`}</Text>
-                    ))
-                  ) : (
-                    <Text style={styles.normalText}>No guests assigned</Text>
-                  )}
-                </View>
-              ))}
-            </View>
-          ) : (
-            <Text style={styles.normalText}>No rooms available for this trip.</Text>
-          )}
-
-          <View style={styles.guestListContainer}>
-            <Text style={styles.sectionTitle}>Unassigned Guests</Text>
-            {unassignedGuestIds.length === 0 ? (
-              <Text style={styles.normalText}>All guests are assigned.</Text>
-            ) : (
-              guests
-                .filter((guest) => unassignedGuestIds.includes(guest.id))
-                .map((guest) => (
-                  <View key={guest.id} style={styles.guestRow}>
-                    <Text style={styles.guestName}>{guest.legal_name}</Text>
-                    <Text style={styles.normalText}>{guest.school}</Text>
-                    <Text style={styles.normalText}>{guest.arrival_window}</Text>
-                  </View>
-                ))
-            )}
-          </View>
-        </View>
-      ) : null}
-    </ScrollView>
-  </TouchableWithoutFeedback>
-</KeyboardAvoidingView>
-  );
-}
-
-function MyRoomScreen({
-  guestId,
-  trip,
-  onBack,
-}: {
-  guestId: number;
-  trip: { id: number; name: string; hotel_name: string };
-  onBack: () => void;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [assignment, setAssignment] = useState<{
-    room_number: string | null;
-    room_type: string | null;
-    room_id: number | null;
-  } | null>(null);
-  const [guestSchool, setGuestSchool] = useState<string>('');
-  const [availableRooms, setAvailableRooms] = useState<RoomOption[]>([]);
-  const [selectedRoomId, setSelectedRoomId] = useState<number | null>(null);
-  const [assigning, setAssigning] = useState(false);
-
-  const loadAssignment = async () => {
-    setLoading(true);
-
-    const [guestRes, assignmentRes, roomsRes, assignmentListRes] = await Promise.all([
-      supabase.from('guests').select('school').eq('id', guestId).maybeSingle(),
-      supabase.from('assignments').select('room_id').eq('guest_id', guestId).maybeSingle(),
-      supabase.from('rooms').select('id, room_number, room_type, capacity, school').eq('trip_id', trip.id),
-      supabase.from('assignments').select('guest_id, room_id').eq('trip_id', trip.id),
-    ]);
-
-    setLoading(false);
-
-    if (guestRes.error || assignmentRes.error || roomsRes.error || assignmentListRes.error) {
-      Alert.alert('Error', JSON.stringify(guestRes.error || assignmentRes.error || roomsRes.error || assignmentListRes.error));
-      return;
-    }
-
-    const guestData = guestRes.data;
-    if (!guestData) {
-      Alert.alert('Error', 'Guest not found');
-      return;
-    }
-
-    setGuestSchool(guestData.school ?? '');
-
-    const roomCounts = new Map<number, number>();
-    (assignmentListRes.data ?? []).forEach((row) => {
-      if (row.room_id) {
-        roomCounts.set(row.room_id, (roomCounts.get(row.room_id) ?? 0) + 1);
-      }
-    });
-
-    const rooms = roomsRes.data ?? [];
-    const assignmentData = assignmentRes.data;
-    if (assignmentData?.room_id) {
-      const room = rooms.find((roomItem) => roomItem.id === assignmentData.room_id);
-      setAssignment({
-        room_number: room?.room_number ?? null,
-        room_type: room?.room_type ?? null,
-        room_id: assignmentData.room_id,
-      });
-      setAvailableRooms([]);
-    } else {
-      setAssignment(null);
-      const available = rooms
-        .filter((room) => room.school === guestData.school)
-        .filter((room) => (room.capacity - (roomCounts.get(room.id) ?? 0)) > 0)
-        .map((room) => ({
-          ...room,
-          occupants: roomCounts.get(room.id) ?? 0,
-        }));
-      setAvailableRooms(available);
-      setSelectedRoomId(available.length > 0 ? available[0].id : null);
-    }
-  };
-
-  const handleAssignRoom = async () => {
-    if (!selectedRoomId) {
-      Alert.alert('Choose a room', 'Please select an available room.');
-      return;
-    }
-
-    setAssigning(true);
-    const { error } = await supabase
-      .from('assignments')
-      .upsert(
-        [{
-          trip_id: trip.id,
-          guest_id: guestId,
-          room_id: selectedRoomId,
-        }],
-        { onConflict: 'guest_id' },
-      );
-    setAssigning(false);
-
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-
-    await loadAssignment();
-    Alert.alert('Room assigned', 'Your room has been assigned.');
-  };
-
-  const digitalKey = assignment?.room_number
-    ? `KEY-${trip.id}-${guestId}-${assignment.room_number.replace(/\s+/g, '')}`
-    : null;
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-          <Text style={styles.title}>My Room</Text>
-          {loading ? (
-            <Text style={styles.subtitle}>Loading room details...</Text>
-          ) : assignment && assignment.room_number ? (
-            <>
-              <Text style={styles.bigBlueText}>{assignment.room_number}</Text>
-              <Text style={styles.subtitle}>{trip.hotel_name}</Text>
-              {assignment.room_type ? <Text style={styles.normalText}>{assignment.room_type}</Text> : null}
-              <Text style={[styles.subtitle, { marginTop: 16 }]}>Digital Key</Text>
-              <View style={styles.roomRow}>
-                <Text style={styles.normalText}>{digitalKey}</Text>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.bigText}>Room Pending</Text>
-              <Text style={styles.subtitle}>Your advisor will assign your room soon.</Text>
-              <Text style={styles.subtitle}>{trip.hotel_name}</Text>
-              {availableRooms.length > 0 ? (
-                <>
-                  <Text style={[styles.subtitle, { marginTop: 24 }]}>Available rooms for your school</Text>
-                  {availableRooms.map((room) => (
-                    <TouchableOpacity
-                      key={room.id}
-                      style={room.id === selectedRoomId ? [styles.roomRow, { borderColor: '#1A56A0', borderWidth: 2 }] : styles.roomRow}
-                      onPress={() => setSelectedRoomId(room.id)}
-                    >
-                      <Text style={styles.guestName}>{room.room_number}</Text>
-                      <Text style={styles.normalText}>{`${room.room_type} • ${room.school}`}</Text>
-                      <Text style={styles.normalText}>{`Capacity ${room.capacity} • ${room.occupants} occupied`}</Text>
-                    </TouchableOpacity>
-                  ))}
-                  <TouchableOpacity style={styles.button} onPress={handleAssignRoom} disabled={assigning || !selectedRoomId}>
-                    <Text style={styles.buttonText}>{assigning ? 'Assigning...' : 'Self-Assign Room'}</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <Text style={styles.normalText}>No available rooms for your school yet.</Text>
-              )}
-            </>
-          )}
-          <TouchableOpacity style={styles.button} onPress={onBack}>
-            <Text style={styles.buttonText}>Back</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
-
-function RoommateRequestScreen({ onBack, guestId, tripId }: { onBack: () => void; guestId: number; tripId: number }) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [allGuests, setAllGuests] = useState<RequestGuest[]>([]);
-  const [myRequest, setMyRequest] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [updating, setUpdating] = useState(false);
-
-  const loadGuests = async () => {
-    setLoading(true);
-    const [{ data: guests, error: guestsError }, { data: me, error: meError }] = await Promise.all([
-      supabase
-        .from('guests')
-        .select('id, legal_name, school, roommate_request_id')
-        .eq('trip_id', tripId)
-        .neq('id', guestId)
-        .order('legal_name', { ascending: true }),
-      supabase
-        .from('guests')
-        .select('roommate_request_id')
-        .eq('id', guestId)
-        .single(),
-    ]);
-
-    setLoading(false);
-    if (guestsError || meError) {
-      Alert.alert('Error', JSON.stringify(guestsError || meError));
-      return;
-    }
-    setAllGuests(guests ?? []);
-    setMyRequest(me?.roommate_request_id ?? null);
-  };
-
-  useEffect(() => {
-    loadGuests();
-  }, []);
-
-  const handleRequest = async (targetGuestId: number) => {
-    setUpdating(true);
-    const { error } = await supabase
-      .from('guests')
-      .update({ roommate_request_id: targetGuestId })
-      .eq('id', guestId);
-
-    setUpdating(false);
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-    setMyRequest(targetGuestId);
-  };
-
-  const handleCancel = async () => {
-    setUpdating(true);
-    const { error } = await supabase
-      .from('guests')
-      .update({ roommate_request_id: null })
-      .eq('id', guestId);
-
-    setUpdating(false);
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-    setMyRequest(null);
-  };
-
-  const filteredGuests = allGuests.filter(guest =>
-    guest.legal_name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  const getStatus = (guest: { id: number; roommate_request_id: number | null }) => {
-    if (myRequest === guest.id && guest.roommate_request_id === guestId) {
-      return 'confirmed';
-    }
-    if (myRequest === guest.id) {
-      return 'pending';
-    }
-    if (guest.roommate_request_id === guestId) {
-      return 'incoming';
-    }
-    return 'none';
-  };
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Request Roommate</Text>
-          <Text style={styles.subtitle}>Search for students in your trip to request as roommate.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Search by name"
-            placeholderTextColor="#94A3B8"
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-          />
-      {loading ? (
-        <Text style={styles.subtitle}>Loading...</Text>
-      ) : (
-        <View style={styles.guestListContainer}>
-          {filteredGuests.length === 0 ? (
-            <Text style={styles.normalText}>No students found.</Text>
-          ) : (
-            filteredGuests.map((guest) => {
-              const status = getStatus(guest);
-              return (
-                <View key={guest.id} style={styles.guestRow}>
-                  <Text style={styles.guestName}>{guest.legal_name}</Text>
-                  <Text style={styles.normalText}>{guest.school}</Text>
-                  {status === 'confirmed' && (
-                    <Text style={[styles.normalText, { color: '#10B981' }]}>Confirmed Roommate</Text>
-                  )}
-                  {status === 'pending' && (
-                    <TouchableOpacity style={styles.secondaryButton} onPress={handleCancel} disabled={updating}>
-                      <Text style={styles.secondaryButtonText}>{updating ? '...' : 'Cancel Request'}</Text>
-                    </TouchableOpacity>
-                  )}
-                  {status === 'incoming' && (
-                    <TouchableOpacity style={styles.button} onPress={() => handleRequest(guest.id)} disabled={updating}>
-                      <Text style={styles.buttonText}>{updating ? '...' : 'Accept Request'}</Text>
-                    </TouchableOpacity>
-                  )}
-                  {status === 'none' && (
-                    <TouchableOpacity style={styles.button} onPress={() => handleRequest(guest.id)} disabled={updating}>
-                      <Text style={styles.buttonText}>{updating ? '...' : 'Request'}</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              );
-            })
-          )}
-        </View>
-      )}
-    </ScrollView>
-  </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
-
-function MessagesScreen({ onBack, role, tripId, guestId }: { onBack: () => void; role: 'advisor' | 'student'; tripId: number; guestId?: number }) {
-  const [threads, setThreads] = useState<ThreadType[]>([]);
-  const [selectedThread, setSelectedThread] = useState<ThreadType | null>(null);
-  const [messages, setMessages] = useState<MessageItem[]>([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [senderName, setSenderName] = useState('');
-
-  const loadThreads = async () => {
-    const [schoolsRes, roomsRes] = await Promise.all([
-      supabase.from('guests').select('school').eq('trip_id', tripId),
-      supabase.from('rooms').select('id, room_number').eq('trip_id', tripId),
-    ]);
-
-    const schools = [...new Set(schoolsRes.data?.map(g => g.school) ?? [])];
-    const rooms = roomsRes.data ?? [];
-
-    let userSchool = '';
-    let userRoomId = null;
-
-    if (role === 'student' && guestId) {
-      const [guestRes, assignRes] = await Promise.all([
-        supabase.from('guests').select('legal_name, school').eq('id', guestId).single(),
-        supabase.from('assignments').select('room_id').eq('guest_id', guestId).maybeSingle(),
-      ]);
-      setSenderName(guestRes.data?.legal_name ?? 'Student');
-      userSchool = guestRes.data?.school ?? '';
-      userRoomId = assignRes.data?.room_id ?? null;
-    } else {
-      setSenderName('Advisor');
-    }
-
-    const threadList: Array<{ id: string; name: string; canPost: boolean }> = [
-      { id: `everyone-${tripId}`, name: 'Everyone', canPost: role === 'advisor' },
-    ];
-
-    if (role === 'advisor') {
-      schools.forEach(school => {
-        threadList.push({ id: `school-${school}-${tripId}`, name: `${school} School`, canPost: true });
-      });
-      rooms.forEach(room => {
-        threadList.push({ id: `room-${room.id}`, name: room.room_number, canPost: true });
-      });
-    } else {
-      if (userSchool) {
-        threadList.push({ id: `school-${userSchool}-${tripId}`, name: `${userSchool} School`, canPost: false });
-      }
-      if (userRoomId) {
-        const room = rooms.find(r => r.id === userRoomId);
-        if (room) {
-          threadList.push({ id: `room-${room.id}`, name: room.room_number, canPost: true });
-        }
-      }
-    }
-
-    setThreads(threadList);
-    if (threadList.length > 0) {
-      setSelectedThread(threadList[0]);
-    }
-  };
-
-  const loadMessages = async () => {
-    if (!selectedThread) return;
-    const { data, error } = await supabase
-      .from('messages')
-      .select('id, sender_name, sender_role, content, created_at')
-      .eq('thread_id', selectedThread.id)
-      .eq('trip_id', tripId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error(error);
-      return;
-    }
-    setMessages(data ?? []);
-  };
-
-  useEffect(() => {
-    loadThreads();
-  }, []);
-
-  useEffect(() => {
-    if (selectedThread) {
-      loadMessages();
-    }
-  }, [selectedThread]);
-
-  useEffect(() => {
-    if (selectedThread) {
-      const interval = setInterval(loadMessages, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [selectedThread]);
-
-  const handleSend = async () => {
-    if (!selectedThread || !newMessage.trim() || !selectedThread.canPost) return;
-
-    setSending(true);
-    const { error } = await supabase
-      .from('messages')
-      .insert({
-        thread_id: selectedThread.id,
-        sender_name: senderName,
-        sender_role: role,
-        content: newMessage.trim(),
-        trip_id: tripId,
-      });
-
-    setSending(false);
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-    setNewMessage('');
-    loadMessages();
-  };
-
-  return (
-    <View style={styles.container}>
-      <TouchableOpacity style={styles.backButton} onPress={onBack}>
-        <Text style={styles.backText}>Back</Text>
+      <TouchableOpacity style={[styles.backButton, { flexDirection: 'row', justifyContent: 'center', gap: 6 }]} onPress={onOpenDisplay}>
+        <Ionicons name="contrast-outline" size={16} color={colors.primary} />
+        <Text style={styles.backText}>Display settings</Text>
       </TouchableOpacity>
-      <Text style={styles.title}>Messages</Text>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.threadSelector}>
-        {threads.map((thread) => (
-          <TouchableOpacity
-            key={thread.id}
-            style={selectedThread?.id === thread.id ? [styles.threadTab, styles.threadTabSelected] : styles.threadTab}
-            onPress={() => setSelectedThread(thread)}
-          >
-            <Text style={selectedThread?.id === thread.id ? [styles.threadTabText, styles.threadTabTextSelected] : styles.threadTabText}>
-              {thread.name}
-            </Text>
+      {isDemoMode && (
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={async () => {
+            if (await confirmAction('Reset demo data?', 'This erases everything you changed in demo mode and logs you out.', 'Reset')) {
+              resetDemoData();
+            }
+          }}
+        >
+          <Text style={[styles.mutedText, { textAlign: 'center' }]}>Demo mode · Reset demo data</Text>
+        </TouchableOpacity>
+      )}
+    </Page>
+  );
+}
+
+function AdvisorScreen({ profile, onBack, onLogout, onOpenDisplay }: { profile: Profile; onBack: () => void; onLogout: () => void; onOpenDisplay: () => void }) {
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [openTripId, setOpenTripId] = useState<number | null>(null);
+
+  // Trips this advisor owns, plus trips where they were added as a co-advisor.
+  const load = async () => {
+    const [{ data: owned, error }, { data: coRows }] = await Promise.all([
+      supabase.from('trips').select(TRIP_COLUMNS).eq('advisor_id', profile.id),
+      supabase.from('trip_advisors').select('trip_id').ilike('email', profile.email),
+    ]);
+    if (error) showAlert('Error', errorMessage(error));
+    const coIds = (coRows ?? []).map((r) => r.trip_id);
+    const { data: coTrips } = coIds.length ? await supabase.from('trips').select(TRIP_COLUMNS).in('id', coIds) : { data: [] };
+    const all = new Map<number, Trip>();
+    [...(owned ?? []), ...(coTrips ?? [])].forEach((t) => all.set(t.id, t as Trip));
+    setTrips([...all.values()].sort((a, b) => (a.check_in ?? '').localeCompare(b.check_in ?? '')));
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    if (!openTripId && !creating) load();
+  }, [openTripId, creating]);
+
+  if (creating) {
+    return (
+      <CreateTripScreen
+        profile={profile}
+        onBack={() => setCreating(false)}
+        onTripCreated={(trip) => {
+          setCreating(false);
+          setOpenTripId(trip.id);
+        }}
+      />
+    );
+  }
+
+  if (openTripId) {
+    return <AdvisorTripDashboard tripId={openTripId} profile={profile} onBack={() => setOpenTripId(null)} />;
+  }
+
+  return (
+    <Page
+      hero={
+        <Hero
+          image={photos.grandLobby}
+          eyebrow={`${profile.full_name} · ${profile.school || 'Advisor'}`}
+          title="My Trips"
+          subtitle="Every trip you run or help with."
+          onBack={onBack}
+          backLabel="Home"
+          height={230}
+        />
+      }
+    >
+      <TouchableOpacity style={[styles.button, { flexDirection: 'row', justifyContent: 'center', gap: 8 }]} onPress={() => setCreating(true)}>
+        <Ionicons name="add" size={20} color={colors.white} />
+        <Text style={styles.buttonText}>Create Trip</Text>
+      </TouchableOpacity>
+
+      {loading ? (
+        <Text style={styles.normalText}>Loading...</Text>
+      ) : trips.length === 0 ? (
+        <Text style={styles.normalText}>No trips yet. Create one to get a join code for your students.</Text>
+      ) : (
+        trips.map((trip) => (
+          <TouchableOpacity key={trip.id} style={styles.card} onPress={() => setOpenTripId(trip.id)} activeOpacity={0.85}>
+            <View style={styles.rowBetween}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' }}>
+                  <Ionicons name="airplane-outline" size={20} color={colors.primary} />
+                </View>
+                <Text style={[styles.cardTitle, { flex: 1 }]}>{trip.name}</Text>
+              </View>
+              {trip.locked_at ? <Badge text="Locked" tone="green" /> : <Badge text="Open" tone="blue" />}
+            </View>
+            {trip.advisor_id !== profile.id && <Badge text="Co-advisor" />}
+            <Text style={styles.cardText}>{`${trip.hotel_name} · ${formatDateRange(trip.check_in, trip.check_out)}`}</Text>
+            <Text style={styles.mutedText}>{`${trip.school ?? ''} · Code ${trip.trip_code}`}</Text>
           </TouchableOpacity>
-        ))}
-      </ScrollView>
+        ))
+      )}
 
-      <ScrollView style={styles.messagesContainer} contentContainerStyle={styles.messagesContent}>
-        {messages.map((msg) => (
-          <View key={msg.id} style={styles.messageRow}>
-            <Text style={styles.messageSender}>{msg.sender_name} ({msg.sender_role})</Text>
-            <Text style={styles.messageContent}>{msg.content}</Text>
-            <Text style={styles.messageTime}>{new Date(msg.created_at).toLocaleString()}</Text>
+      <TouchableOpacity style={styles.secondaryButton} onPress={onOpenDisplay}>
+        <Text style={styles.secondaryButtonText}>Display Settings</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.secondaryButton} onPress={onLogout}>
+        <Text style={styles.secondaryButtonText}>Log Out</Text>
+      </TouchableOpacity>
+    </Page>
+  );
+}
+
+type AdvisorSubScreen =
+  | 'rooms'
+  | 'roster'
+  | 'assign'
+  | 'messages'
+  | 'locations'
+  | 'notifications'
+  | 'addstudents'
+  | 'checkin'
+  | 'settings'
+  | 'schedule'
+  | 'roomchecks'
+  | 'history'
+  | 'invite'
+  | null;
+
+const ADVISOR_LINKS: NotificationLink[] = ['assign', 'roster', 'checkin', 'messages', 'team', 'schedule', 'roomchecks', 'history'];
+
+function AdvisorTripDashboard({ tripId, profile, onBack }: { tripId: number; profile: Profile; onBack: () => void }) {
+  const [trip, setTrip] = useState<Trip | null>(null);
+  const [stats, setStats] = useState({ guests: 0, assigned: 0, rooms: 0, beds: 0, ready: 0, sharing: 0, checkedIn: 0, slips: 0, students: 0 });
+  const [unread, setUnread] = useState(0);
+  const [subScreen, setSubScreen] = useState<AdvisorSubScreen>(null);
+  const [arrival, setArrival] = useState<string | null>(null);
+  const [savingArrival, setSavingArrival] = useState(false);
+  const [locking, setLocking] = useState(false);
+
+  useSystemAlerts({ audience: 'advisor', tripIds: [tripId] });
+
+  const load = async () => {
+    await applyLockDeadline(tripId); // no-op unless the room-pick deadline just passed
+    const [{ data: tripRow }, { data: guestRows }, { data: assignmentRows }, { data: roomRows }, unreadCount] = await Promise.all([
+      supabase.from('trips').select(TRIP_COLUMNS).eq('id', tripId).maybeSingle(),
+      supabase.from('guests').select('id, share_location, checked_in_at, is_chaperone').eq('trip_id', tripId),
+      supabase.from('assignments').select('guest_id').eq('trip_id', tripId),
+      supabase.from('rooms').select('capacity, ready_at').eq('trip_id', tripId),
+      countUnread({ audience: 'advisor', tripIds: [tripId] }),
+    ]);
+    const { data: slipRows } = await supabase.from('permission_slips').select('guest_id').eq('trip_id', tripId);
+    const nextTrip = tripRow as Trip | null;
+    setTrip(nextTrip);
+    setArrival((prev) => prev ?? nextTrip?.arrival_time ?? '14:00');
+    setStats({
+      guests: guestRows?.length ?? 0,
+      assigned: assignmentRows?.length ?? 0,
+      rooms: roomRows?.length ?? 0,
+      beds: (roomRows ?? []).reduce((sum, room) => sum + room.capacity, 0),
+      ready: (roomRows ?? []).filter((room) => room.ready_at).length,
+      sharing: (guestRows ?? []).filter((guest) => guest.share_location).length,
+      checkedIn: (guestRows ?? []).filter((guest) => guest.checked_in_at).length,
+      slips: slipRows?.length ?? 0,
+      // Only students need permission slips; chaperones are adults.
+      students: (guestRows ?? []).filter((guest) => !guest.is_chaperone).length,
+    });
+    setUnread(unreadCount);
+  };
+
+  useEffect(() => {
+    if (subScreen) return;
+    load();
+    const interval = setInterval(load, 15000);
+    return () => clearInterval(interval);
+  }, [subScreen]);
+
+  if (!trip) {
+    return (
+      <Page>
+        <BackButton onPress={onBack} />
+        <Text style={styles.normalText}>Loading trip...</Text>
+      </Page>
+    );
+  }
+
+  const back = () => setSubScreen(null);
+  if (subScreen === 'rooms') return <RoomInventoryScreen trip={trip} role="advisor" onBack={back} />;
+  if (subScreen === 'roster') return <AdvisorRosterScreen trip={trip} onBack={back} />;
+  if (subScreen === 'assign') return <AdvisorAssignmentScreen trip={trip} onBack={back} />;
+  if (subScreen === 'messages') return <MessagesScreen role="advisor" tripId={trip.id} advisorName={profile.full_name} onBack={back} />;
+  if (subScreen === 'locations') return <LocationsScreen tripId={trip.id} onBack={back} />;
+  if (subScreen === 'addstudents') return <AddStudentsScreen trip={trip} onBack={back} />;
+  if (subScreen === 'checkin') return <CheckInScreen trip={trip} role="advisor" onBack={back} />;
+  if (subScreen === 'settings') return <TripSettingsScreen trip={trip} profile={profile} onBack={back} />;
+  if (subScreen === 'schedule') return <ScheduleScreen trip={trip} canEdit onBack={back} />;
+  if (subScreen === 'roomchecks') return <RoomChecksScreen trip={trip} checkerName={profile.full_name} onBack={back} />;
+  if (subScreen === 'history') return <RoomHistoryScreen trip={trip} onBack={back} />;
+  if (subScreen === 'invite') return <InviteScreen trip={trip} onBack={back} />;
+  if (subScreen === 'notifications') {
+    return (
+      <NotificationsScreen
+        scope={{ audience: 'advisor', tripIds: [trip.id] }}
+        userId={profile.id}
+        onBack={back}
+        openable={ADVISOR_LINKS}
+        onOpen={(link) => setSubScreen(link === 'team' ? 'settings' : (link as AdvisorSubScreen))}
+      />
+    );
+  }
+
+  const saveArrival = async () => {
+    setSavingArrival(true);
+    const { error } = await supabase.from('trips').update({ arrival_time: arrival }).eq('id', trip.id);
+    setSavingArrival(false);
+    if (error) {
+      showAlert('Error', errorMessage(error));
+      return;
+    }
+    await notify(trip.id, 'staff', 'Arrival time updated', `${trip.school ?? trip.name} now expects to arrive at ${formatTime(arrival)} on ${trip.check_in}.`, null, 'manifest');
+    showAlert('Arrival time sent', `The hotel will prep rooms for a ${formatTime(arrival)} arrival.`);
+    await load();
+  };
+
+  const lockAndSend = async () => {
+    const unassigned = stats.guests - stats.assigned;
+    const warning = unassigned > 0 ? `${unassigned} people still have no room. ` : '';
+    const ok = await confirmAction(
+      'Lock rooms and send manifest?',
+      `${warning}Students won't be able to change rooms, and ${trip.hotel_name} gets the rooming list.`,
+      'Lock & Send',
+    );
+    if (!ok) return;
+    setLocking(true);
+    const now = new Date().toISOString();
+    const { error } = await supabase.from('trips').update({ locked_at: now, manifest_sent_at: now }).eq('id', trip.id);
+    if (error) {
+      setLocking(false);
+      showAlert('Error locking assignments', errorMessage(error));
+      return;
+    }
+    // Cancel any invites/requests still waiting: they can't be acted on anymore.
+    await supabase.from('room_requests').update({ status: 'cancelled' }).eq('trip_id', trip.id).eq('status', 'pending');
+    await notify(
+      trip.id,
+      'staff',
+      'Manifest received',
+      `${trip.school ?? trip.name} locked rooms: ${stats.assigned} guests in ${stats.rooms} rooms. Arrival ${formatTime(trip.arrival_time)} on ${trip.check_in}.`,
+      null,
+      'manifest',
+    );
+    const { data: guestRows } = await supabase.from('guests').select('id').eq('trip_id', trip.id);
+    await notifyGuests(trip.id, (guestRows ?? []).map((g) => g.id), 'Rooms are locked', 'Your advisor locked room assignments. Check My Room for your final room.', 'rooms');
+    setLocking(false);
+    showAlert('Locked', 'Rooms are locked and the manifest was sent to the hotel.');
+    await load();
+  };
+
+  const unlock = async () => {
+    // A deadline that already passed would lock the trip again right away, so unlocking clears it.
+    const deadlinePassed = Boolean(trip.lock_deadline && new Date(trip.lock_deadline).getTime() <= Date.now());
+    const ok = await confirmAction(
+      'Unlock rooms?',
+      `Students will be able to change rooms again, and the hotel will be told the manifest may change.${deadlinePassed ? ' The passed room-pick deadline will be cleared; set a new one in Trip Settings.' : ''}`,
+      'Unlock',
+    );
+    if (!ok) return;
+    const { error } = await supabase
+      .from('trips')
+      .update({ locked_at: null, manifest_sent_at: null, ...(deadlinePassed ? { lock_deadline: null } : {}) })
+      .eq('id', trip.id);
+    if (error) {
+      showAlert('Error', errorMessage(error));
+      return;
+    }
+    await notify(trip.id, 'staff', 'Manifest withdrawn', `${trip.school ?? trip.name} unlocked rooms to make changes. A new manifest will follow.`, null, 'manifest');
+    await load();
+  };
+
+  const grid: Array<{ key: AdvisorSubScreen; label: string; icon: IconName; tint: string; count?: number }> = [
+    { key: 'rooms', label: `Rooms (${stats.rooms})`, icon: 'bed-outline', tint: colors.primary },
+    { key: 'assign', label: 'Assign Rooms', icon: 'grid-outline', tint: '#7C3AED' },
+    { key: 'roster', label: 'Roster', icon: 'people-outline', tint: colors.success },
+    { key: 'addstudents', label: 'Add Students', icon: 'person-add-outline', tint: '#0891B2' },
+    { key: 'messages', label: 'Messages', icon: 'chatbubbles-outline', tint: '#7C3AED' },
+    { key: 'notifications', label: 'Notifications', icon: 'notifications-outline', tint: '#DB2777', count: unread },
+    { key: 'checkin', label: `Check-In (${stats.checkedIn}/${stats.guests})`, icon: 'checkmark-done-outline', tint: colors.success },
+    { key: 'locations', label: `Locations (${stats.sharing})`, icon: 'map-outline', tint: colors.danger },
+    { key: 'schedule', label: 'Schedule', icon: 'calendar-outline', tint: '#0891B2' },
+    { key: 'roomchecks', label: 'Room Checks', icon: 'moon-outline', tint: '#7C3AED' },
+    { key: 'history', label: 'Room History', icon: 'time-outline', tint: colors.muted },
+    { key: 'invite', label: 'Invite Students', icon: 'qr-code-outline', tint: colors.primary },
+    { key: 'settings', label: 'Trip Settings', icon: 'settings-outline', tint: colors.muted },
+  ];
+  const bedsShort = Math.max(0, Math.max(trip.headcount ?? 0, stats.guests) - stats.beds);
+
+  return (
+    <Page
+      hero={
+        <Hero
+          image={photos.lobby}
+          eyebrow={`${trip.school ?? ''} · ${formatDateRange(trip.check_in, trip.check_out)}`}
+          title={trip.name}
+          subtitle={`${trip.hotel_name}${trip.hotel_address ? ` · ${trip.hotel_address}` : ''}`}
+          onBack={onBack}
+          backLabel="My Trips"
+        >
+          <View style={{ flexDirection: 'row', marginTop: 14 }}>
+            <View style={{ backgroundColor: trip.locked_at ? colors.success : 'rgba(255,255,255,0.18)', borderRadius: 999, paddingVertical: 6, paddingHorizontal: 12 }}>
+              <Text style={{ color: colors.white, fontSize: 13, fontWeight: '700' }}>{trip.locked_at ? 'Rooms locked · manifest sent' : 'Rooms open for picking'}</Text>
+            </View>
           </View>
-        ))}
-      </ScrollView>
+        </Hero>
+      }
+    >
+      <View style={styles.statsContainer}>
+        <View style={styles.statBox}>
+          <Text style={styles.statNumber}>{`${stats.guests}`}</Text>
+          <Text style={styles.statLabel}>{`of ${trip.headcount ?? '?'} joined`}</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={styles.statNumber}>{stats.assigned}</Text>
+          <Text style={styles.statLabel}>In rooms</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={styles.statNumber}>{stats.guests - stats.assigned}</Text>
+          <Text style={styles.statLabel}>No room</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={styles.statNumber}>{stats.beds}</Text>
+          <Text style={styles.statLabel}>Beds</Text>
+        </View>
+      </View>
 
-      {selectedThread?.canPost && (
-        <View style={styles.messageInputContainer}>
-          <TextInput
-            style={styles.messageInput}
-            placeholder="Type a message..."
-            placeholderTextColor="#94A3B8"
-            value={newMessage}
-            onChangeText={setNewMessage}
-            multiline
-          />
-          <TouchableOpacity style={styles.sendButton} onPress={handleSend} disabled={sending || !newMessage.trim()}>
-            <Text style={styles.sendButtonText}>{sending ? '...' : 'Send'}</Text>
-          </TouchableOpacity>
+      {bedsShort > 0 && stats.rooms > 0 && (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>{`Not enough beds: ${bedsShort} short. The hotel has been told to add rooms.`}</Text>
         </View>
       )}
-    </View>
-  );
-}
-
-function StudentScreen({ onBack }: { onBack: () => void }) {
-  const [tripCode, setTripCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [joinedTrip, setJoinedTrip] = useState<{ id: number; name: string; hotel_name: string } | null>(null);
-  const [legalName, setLegalName] = useState('');
-  const [email, setEmail] = useState('');
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [schoolName, setSchoolName] = useState('');
-  const [arrivalWindow, setArrivalWindow] = useState<'12-2 PM' | '2-4 PM' | '4-6 PM' | '6-8 PM' | ''>('');
-  const [isChaperone, setIsChaperone] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [guestId, setGuestId] = useState<number | null>(null);
-  const [submittedTrip, setSubmittedTrip] = useState<{ id: number; name: string; hotel_name: string } | null>(null);
-  const [submissionComplete, setSubmissionComplete] = useState(false);
-  const [showRoomScreen, setShowRoomScreen] = useState(false);
-  const [showRoommateRequest, setShowRoommateRequest] = useState(false);
-  const [showMessages, setShowMessages] = useState(false);
-
-  const arrivalOptions = ['12-2 PM', '2-4 PM', '4-6 PM', '6-8 PM'] as const;
-
-  const handleJoin = async () => {
-    const code = tripCode.trim();
-    if (!code) {
-      Alert.alert('Missing code', 'Please enter a trip code.');
-      return;
-    }
-
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('trips')
-      .select('id, name, hotel_name')
-      .eq('trip_code', code)
-      .maybeSingle();
-    setLoading(false);
-
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-
-    if (!data) {
-      Alert.alert('Trip not found', 'Trip not found - check your code');
-      return;
-    }
-
-    Alert.alert(
-      'Is this your trip?',
-      `${data.name}\n${data.hotel_name}`,
-      [
-        { text: 'No' },
-        { text: 'Yes', onPress: () => setJoinedTrip(data) },
-      ],
-    );
-  };
-
-  const handleSubmit = async () => {
-    if (!joinedTrip) {
-      return;
-    }
-
-    if (!legalName.trim() || !email.trim() || !phoneNumber.trim() || !schoolName.trim() || !arrivalWindow) {
-      Alert.alert('Missing info', 'Please complete all fields before submitting.');
-      return;
-    }
-
-    setSubmitting(true);
-    const { data, error } = await supabase
-      .from('guests')
-      .insert([
-        {
-          trip_id: joinedTrip.id,
-          legal_name: legalName.trim(),
-          email: email.trim(),
-          phone: phoneNumber.trim(),
-          school: schoolName.trim(),
-          arrival_window: arrivalWindow,
-          is_chaperone: isChaperone,
-        },
-      ])
-      .select('id')
-      .single();
-    setSubmitting(false);
-
-    if (error) {
-      Alert.alert('Error', JSON.stringify(error));
-      return;
-    }
-
-    Alert.alert('Success', "You're all set! Your advisor will assign your room soon");
-    setGuestId(data?.id ?? null);
-    setSubmittedTrip(joinedTrip);
-    setSubmissionComplete(true);
-    setTripCode('');
-    setJoinedTrip(null);
-    setLegalName('');
-    setEmail('');
-    setPhoneNumber('');
-    setSchoolName('');
-    setArrivalWindow('');
-    setIsChaperone(false);
-  };
-
-  if (showRoomScreen && guestId && submittedTrip) {
-    return <MyRoomScreen guestId={guestId} trip={submittedTrip} onBack={() => setShowRoomScreen(false)} />;
-  }
-
-  if (showRoommateRequest && guestId && submittedTrip) {
-    return <RoommateRequestScreen guestId={guestId} tripId={submittedTrip.id} onBack={() => setShowRoommateRequest(false)} />;
-  }
-
-  if (showMessages && guestId && submittedTrip) {
-    return <MessagesScreen onBack={() => setShowMessages(false)} role="student" tripId={submittedTrip.id} guestId={guestId} />;
-  }
-
-  if (submissionComplete) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.title}>You're all set!</Text>
-        <Text style={styles.subtitle}>Your advisor will assign your room soon.</Text>
-        <TouchableOpacity style={styles.button} onPress={() => setShowRoommateRequest(true)}>
-          <Text style={styles.buttonText}>Request Roommate</Text>
+      {stats.students > 0 && stats.slips < stats.students && (
+        <TouchableOpacity style={[styles.banner, { backgroundColor: colors.primarySoft }]} onPress={() => setSubScreen('roster')}>
+          <Text style={[styles.bannerText, { color: colors.primaryDark }]}>{`Permission slips: ${stats.slips} of ${stats.students} students signed · See who's missing`}</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.button} onPress={() => setShowRoomScreen(true)}>
-          <Text style={styles.buttonText}>View My Room</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.button} onPress={() => setShowMessages(true)}>
-          <Text style={styles.buttonText}>Messages</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.backButton} onPress={onBack}>
-          <Text style={styles.backText}>Back</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+      )}
 
-  if (joinedTrip) {
-    return (
-      <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-            <Text style={styles.title}>Check-In Form</Text>
-            <Text style={styles.subtitle}>{`Trip: ${joinedTrip.name} - ${joinedTrip.hotel_name}`}</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Legal Name"
-              placeholderTextColor="#94A3B8"
-              value={legalName}
-              onChangeText={setLegalName}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="Email"
-              placeholderTextColor="#94A3B8"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              value={email}
-              onChangeText={setEmail}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="Phone Number"
-              placeholderTextColor="#94A3B8"
-              keyboardType="phone-pad"
-              value={phoneNumber}
-              onChangeText={setPhoneNumber}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="School Name"
-              placeholderTextColor="#94A3B8"
-              value={schoolName}
-              onChangeText={setSchoolName}
-            />
-            <Text style={[styles.subtitle, { marginBottom: 16 }]}>Select your arrival window</Text>
-            <View style={styles.optionRow}>
-              {arrivalOptions.map((option) => (
-                <TouchableOpacity
-                  key={option}
-                  style={
-                    arrivalWindow === option
-                      ? [styles.optionButton, styles.optionButtonSelected]
-                      : styles.optionButton
-                  }
-                  onPress={() => setArrivalWindow(option)}
-                >
-                  <Text
-                    style={
-                      arrivalWindow === option
-                        ? [styles.optionButtonText, styles.optionButtonTextSelected]
-                        : styles.optionButtonText
-                    }
-                  >
-                    {option}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.toggleRow}>
-              <TouchableOpacity
-                style={isChaperone ? [styles.toggleButton, styles.toggleButtonSelected] : styles.toggleButton}
-                onPress={() => setIsChaperone((prev) => !prev)}
-              >
-                <Text style={styles.toggleText}>I am a chaperone</Text>
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity style={styles.button} onPress={handleSubmit} disabled={submitting}>
-              <Text style={styles.buttonText}>{submitting ? 'Submitting...' : 'Submit'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.backButton} onPress={onBack}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
-    );
-  }
-
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.container}>
-          <Text style={styles.title}>Join Trip</Text>
-          <Text style={styles.subtitle}>Enter the 6-digit trip code.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Trip Code"
-            placeholderTextColor="#94A3B8"
-            value={tripCode}
-            onChangeText={setTripCode}
-          />
-          <TouchableOpacity style={styles.button} onPress={handleJoin} disabled={loading}>
-            <Text style={styles.buttonText}>{loading ? 'Joining...' : 'Join Trip'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
+      <View style={styles.card}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.label}>Join code</Text>
+          <Text style={[styles.cardTitle, { letterSpacing: 2 }]}>{trip.trip_code}</Text>
         </View>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
-  );
-}
-
-function StaffScreen({ onBack }: { onBack: () => void }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [tripCode, setTripCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [tripInfo, setTripInfo] = useState<{ id: number; name: string; hotel_name: string; trip_code: string } | null>(null);
-  const [rooms, setRooms] = useState<RoomOption[]>([]);
-  const [assignmentCounts, setAssignmentCounts] = useState(new Map() as AssignmentCountMap);
-  const [guestCount, setGuestCount] = useState(null as number | null);
-
-  const handleLogin = () => {
-    if (!email.trim() || !password.trim()) {
-      Alert.alert('Missing credentials', 'Please enter email and password.');
-      return;
-    }
-    setLoggedIn(true);
-  };
-
-  const loadTripDashboard = async () => {
-    const code = tripCode.trim();
-    if (!code) {
-      Alert.alert('Missing code', 'Please enter a trip code.');
-      return;
-    }
-
-    setLoading(true);
-    const { data: trip, error: tripError } = await supabase
-      .from('trips')
-      .select('id, name, hotel_name, trip_code')
-      .eq('trip_code', code)
-      .maybeSingle();
-
-    if (tripError) {
-      setLoading(false);
-      Alert.alert('Error', JSON.stringify(tripError));
-      return;
-    }
-
-    if (!trip) {
-      setLoading(false);
-      Alert.alert('Trip not found', 'Trip not found - check your code');
-      return;
-    }
-
-    const [{ data: roomsForTrip, error: roomError2 }, { data: assignmentsData, error: assignError }, { data: guestsForTrip, error: guestError2 }] = await Promise.all([
-      supabase.from('rooms').select('id, room_number, room_type, capacity, school').eq('trip_id', trip.id).order('room_number', { ascending: true }),
-      supabase.from('assignments').select('room_id').eq('trip_id', trip.id),
-      supabase.from('guests').select('id').eq('trip_id', trip.id),
-    ]);
-
-    setLoading(false);
-
-    if (roomError2 || assignError || guestError2) {
-      Alert.alert('Error', JSON.stringify(roomError2 || assignError || guestError2));
-      return;
-    }
-
-    const counts = new Map<number, number>();
-    (assignmentsData ?? []).forEach((row) => {
-      if (row.room_id) {
-        counts.set(row.room_id, (counts.get(row.room_id) ?? 0) + 1);
-      }
-    });
-
-    setTripInfo(trip);
-    setRooms(roomsForTrip ?? []);
-    setAssignmentCounts(counts);
-    setGuestCount(guestsForTrip?.length ?? 0);
-  };
-
-  if (!loggedIn) {
-    return (
-      <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <View style={styles.container}>
-            <Text style={styles.title}>Hotel Dashboard</Text>
-            <Text style={styles.subtitle}>Sign in to manage hotel check-in.</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Email"
-              placeholderTextColor="#94A3B8"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              value={email}
-              onChangeText={setEmail}
+        <Text style={styles.mutedText}>{`Share this with ${trip.school ?? 'your'} students. It only works for this school.`}</Text>
+        <View style={styles.actionRow}>
+          <SmallButton text="Show QR Code & Invite Link" onPress={() => setSubScreen('invite')} />
+        </View>
+        {isDemoMode && !trip.locked_at && (
+          <View style={styles.actionRow}>
+            <SmallButton
+              text="Add Demo Students"
+              secondary
+              onPress={async () => {
+                const added = addDemoStudentsToTrip(trip);
+                showAlert(
+                  added.length ? `Added ${added.length} people` : 'No one to add',
+                  added.length
+                    ? `${added.join(', ')} joined with code ${trip.trip_code}.`
+                    : `Every demo account from ${trip.school ?? 'this school'} is already on a trip.`,
+                );
+                await load();
+              }}
             />
-            <TextInput
-              style={styles.input}
-              placeholder="Password"
-              placeholderTextColor="#94A3B8"
-              secureTextEntry
-              value={password}
-              onChangeText={setPassword}
-            />
-            <TouchableOpacity style={styles.button} onPress={handleLogin}>
-              <Text style={styles.buttonText}>Login</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.backButton} onPress={onBack}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
           </View>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
-    );
-  }
+        )}
+      </View>
 
-  return (
-    <KeyboardAvoidingView style={styles.keyboardAvoidingContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <ScrollView style={styles.scrollView} contentContainerStyle={[styles.scrollContent, styles.pageContent]}>
-          <TouchableOpacity style={styles.backButton} onPress={onBack}>
-            <Text style={styles.backText}>Back</Text>
+      <View style={styles.buttonsGrid}>
+        {grid.map((item) => (
+          <Tile key={item.key} icon={item.icon} label={item.label} tint={item.tint} count={item.count} onPress={() => setSubScreen(item.key)} />
+        ))}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Estimated arrival</Text>
+        <Text style={styles.mutedText}>The hotel preps rooms in arrival order and notifies students when their room is ready.</Text>
+        <View style={[styles.rowBetween, { marginTop: 8 }]}>
+          <SmallButton text="− 15 min" secondary onPress={() => setArrival((t) => stepTime(t, -15))} />
+          <Text style={styles.bigBlueText}>{formatTime(arrival)}</Text>
+          <SmallButton text="+ 15 min" secondary onPress={() => setArrival((t) => stepTime(t, 15))} />
+        </View>
+        {arrival !== trip.arrival_time && (
+          <TouchableOpacity style={styles.button} onPress={saveArrival} disabled={savingArrival}>
+            <Text style={styles.buttonText}>{savingArrival ? 'Sending...' : 'Send Arrival Time to Hotel'}</Text>
           </TouchableOpacity>
-          <Text style={styles.title}>Hotel Dashboard</Text>
-          <Text style={styles.subtitle}>Search a trip by code and review room occupancy.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Trip Code"
-            placeholderTextColor="#94A3B8"
-            value={tripCode}
-            onChangeText={setTripCode}
-          />
-          <TouchableOpacity style={styles.button} onPress={loadTripDashboard} disabled={loading}>
-            <Text style={styles.buttonText}>{loading ? 'Loading...' : 'Load Trip'}</Text>
-          </TouchableOpacity>
-          {tripInfo ? (
-            <View style={styles.roomList}>
-              <Text style={styles.sectionTitle}>{`${tripInfo.name} - ${tripInfo.hotel_name}`}</Text>
-              <Text style={styles.normalText}>{`Trip Code: ${tripInfo.trip_code}`}</Text>
-              <Text style={styles.normalText}>{`Guest count: ${guestCount ?? 0}`}</Text>
-              {rooms.map((room) => (
-                <View key={room.id} style={styles.roomRow}>
-                  <Text style={styles.guestName}>{room.room_number}</Text>
-                  <Text style={styles.normalText}>{`${room.school} • ${room.room_type}`}</Text>
-                  <Text style={styles.normalText}>{`Capacity ${room.capacity} • ${assignmentCounts.get(room.id) ?? 0} occupied`}</Text>
-                </View>
-              ))}
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Lock & manifest</Text>
+        {trip.locked_at ? (
+          <>
+            <Badge text={`Locked · manifest sent ${timeAgo(trip.manifest_sent_at)}`} tone="green" />
+            <Text style={styles.mutedText}>{`${stats.ready} of ${stats.rooms} rooms marked ready by the hotel.`}</Text>
+            <View style={styles.actionRow}>
+              <SmallButton text="Unlock Rooms" secondary onPress={unlock} />
             </View>
-          ) : null}
-          <TouchableOpacity style={styles.secondaryButton} onPress={() => setLoggedIn(false)}>
-            <Text style={styles.secondaryButtonText}>Sign Out</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
+          </>
+        ) : (
+          <>
+            <Text style={styles.mutedText}>
+              {trip.lock_deadline
+                ? `Students can pick and switch rooms until ${formatDeadline(trip.lock_deadline)}, when rooms lock automatically. You can also lock now.`
+                : 'Students can pick and switch rooms until you lock. Locking freezes rooms and sends the rooming list to the hotel. Set a deadline in Trip Settings to lock automatically.'}
+            </Text>
+            <TouchableOpacity style={[styles.button, { marginTop: 8 }]} onPress={lockAndSend} disabled={locking}>
+              <Text style={styles.buttonText}>{locking ? 'Locking...' : 'Lock Rooms & Send Manifest'}</Text>
+            </TouchableOpacity>
+          </>
+        )}
+        <Text style={[styles.label, { marginTop: 12 }]}>Rooming list (with contacts and medical notes)</Text>
+        <View style={styles.actionRow}>
+          <SmallButton text="Download CSV" secondary onPress={() => exportManifestCsv(trip, 'advisor').catch((e) => showAlert('Export failed', errorMessage(e)))} />
+          <SmallButton text="Print / Save PDF" secondary onPress={() => printManifest(trip, 'advisor').catch((e) => showAlert('Print failed', errorMessage(e)))} />
+        </View>
+      </View>
+    </Page>
   );
 }
 
-export default function App() {
-const [screen, setScreen] = useState<Screen>('home');
+function AdvisorRosterScreen({ trip, onBack }: { trip: Trip; onBack: () => void }) {
+  const [guests, setGuests] = useState<Guest[]>([]);
+  const [roomOf, setRoomOf] = useState<Map<number, string>>(new Map());
+  const [details, setDetails] = useState<Map<number, GuestDetails>>(new Map());
+  const [signed, setSigned] = useState<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check if user is already logged in
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        const role = session.user.user_metadata?.role;
-        if (role === 'Advisor') setScreen('advisor');
-        else if (role === 'Student') setScreen('student');
-        else if (role === 'Hotel Staff') setScreen('staff');
-      }
+    const load = async () => {
+      const [{ data: guestRows, error }, { data: assignmentRows }, { data: roomRows }, { data: detailRows }] = await Promise.all([
+        supabase.from('guests').select(GUEST_COLUMNS).eq('trip_id', trip.id).order('legal_name', { ascending: true }),
+        supabase.from('assignments').select('guest_id, room_id').eq('trip_id', trip.id),
+        supabase.from('rooms').select('id, room_number').eq('trip_id', trip.id),
+        supabase.from('guest_details').select(GUEST_DETAILS_COLUMNS).eq('trip_id', trip.id),
+      ]);
+      if (error) showAlert('Error', errorMessage(error));
+      setDetails(new Map(((detailRows ?? []) as GuestDetails[]).map((d) => [d.guest_id, d])));
+      const { data: slipRows } = await supabase.from('permission_slips').select('guest_id, signed_name').eq('trip_id', trip.id);
+      setSigned(new Map((slipRows ?? []).map((r) => [r.guest_id, r.signed_name])));
+      const roomNumbers = new Map((roomRows ?? []).map((room) => [room.id, room.room_number]));
+      setRoomOf(new Map((assignmentRows ?? []).map((row) => [row.guest_id, roomNumbers.get(row.room_id) ?? '?'])));
+      setGuests((guestRows ?? []) as Guest[]);
       setLoading(false);
+    };
+    load();
+  }, [trip.id]);
+
+  return (
+    <Page>
+      <BackButton onPress={onBack} />
+      <Text style={styles.pageTitle}>Roster</Text>
+      <Text style={styles.pageSubtitle}>{`${guests.length} of ${trip.headcount ?? '?'} people have joined`}</Text>
+      {loading ? (
+        <Text style={styles.normalText}>Loading...</Text>
+      ) : guests.length === 0 ? (
+        <Text style={styles.normalText}>{`No one has joined yet. Share code ${trip.trip_code}.`}</Text>
+      ) : (
+        guests.map((guest) => (
+          <View key={guest.id} style={styles.card}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.cardTitle}>{guest.legal_name}</Text>
+              {roomOf.has(guest.id) ? <Badge text={`Room ${roomOf.get(guest.id)}`} tone="green" /> : <Badge text="No room" tone="amber" />}
+            </View>
+            <Text style={styles.cardText}>{`${guest.is_chaperone ? 'Chaperone' : 'Student'} · ${guest.gender ?? 'gender not set'} · ${guest.school}`}</Text>
+            <Text style={styles.mutedText}>{`${guest.phone ?? 'no phone'} · ${guest.email ?? 'no email'}${guest.share_location ? ' · sharing location' : ''}${guest.checked_in_at ? ' · checked in' : ''}${guest.user_id ? '' : ' · no account yet'}`}</Text>
+            {details.get(guest.id)?.emergency_name ? (
+              <Text style={styles.mutedText}>{`Emergency: ${details.get(guest.id)!.emergency_name}${details.get(guest.id)!.emergency_relationship ? ` (${details.get(guest.id)!.emergency_relationship})` : ''} ${details.get(guest.id)!.emergency_phone ?? ''}`}</Text>
+            ) : (
+              <Text style={[styles.mutedText, { color: colors.warning }]}>No emergency contact yet</Text>
+            )}
+            {guest.is_chaperone ? null : signed.has(guest.id) ? (
+              <Text style={[styles.mutedText, { color: colors.success }]}>{`Permission slip signed by ${signed.get(guest.id)}`}</Text>
+            ) : (
+              <Text style={[styles.mutedText, { color: colors.warning }]}>
+                {details.get(guest.id)?.parent_email ? `Permission slip not signed yet (parent: ${details.get(guest.id)!.parent_email})` : 'Permission slip not signed · no parent email added yet'}
+              </Text>
+            )}
+            {details.get(guest.id)?.medical_notes ? (
+              <Text style={[styles.mutedText, { color: colors.danger }]}>{`Medical: ${details.get(guest.id)!.medical_notes}`}</Text>
+            ) : null}
+          </View>
+        ))
+      )}
+    </Page>
+  );
+}
+
+function AdvisorAssignmentScreen({ trip, onBack }: { trip: Trip; onBack: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [locked, setLocked] = useState(Boolean(trip.locked_at));
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [guests, setGuests] = useState<Guest[]>([]);
+  const [saved, setSaved] = useState<AssignmentItem[]>([]);
+  const [separate, setSeparate] = useState(trip.separate_chaperones);
+  const [assignments, setAssignments] = useState<AssignmentItem[]>([]);
+  const [editingGuestId, setEditingGuestId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    const [{ data: tripRow }, { data: roomRows, error: roomError }, { data: guestRows, error: guestError }, { data: assignmentRows, error: assignmentError }] =
+      await Promise.all([
+        supabase.from('trips').select('locked_at, lock_deadline, separate_chaperones').eq('id', trip.id).maybeSingle(),
+        supabase.from('rooms').select(ROOM_COLUMNS).eq('trip_id', trip.id).order('room_number', { ascending: true }),
+        supabase.from('guests').select(GUEST_COLUMNS).eq('trip_id', trip.id).order('legal_name', { ascending: true }),
+        supabase.from('assignments').select('guest_id, room_id').eq('trip_id', trip.id),
+      ]);
+    setLoading(false);
+    if (roomError || guestError || assignmentError) {
+      showAlert('Error', errorMessage(roomError || guestError || assignmentError));
+      return;
+    }
+    const current = (assignmentRows ?? []).map((row) => ({ guest_id: row.guest_id, room_id: row.room_id }));
+    setLocked(Boolean(tripRow?.locked_at) || Boolean(tripRow?.lock_deadline && new Date(tripRow.lock_deadline).getTime() <= Date.now()));
+    setSeparate(Boolean(tripRow?.separate_chaperones));
+    setRooms((roomRows ?? []) as Room[]);
+    setGuests((guestRows ?? []) as Guest[]);
+    setSaved(current);
+    setAssignments(current);
+    setEditingGuestId(null);
+  };
+
+  useEffect(() => {
+    load();
+  }, [trip.id]);
+
+  const roomGuests = (roomId: number) =>
+    assignments.filter((a) => a.room_id === roomId).map((a) => guests.find((g) => g.id === a.guest_id)).filter(Boolean) as Guest[];
+  const roomIdOf = (guestId: number) => assignments.find((a) => a.guest_id === guestId)?.room_id ?? null;
+  const unassigned = guests.filter((guest) => roomIdOf(guest.id) === null);
+
+  // Rooms this person could move into: same school and gender, with a free bed.
+  const roomsFor = (guest: Guest) =>
+    rooms.filter((room) => {
+      if (room.id === roomIdOf(guest.id)) return false;
+      const others = roomGuests(room.id).filter((g) => g.id !== guest.id);
+      return others.length < room.capacity && canUseRoom(guest, room, others, separate);
     });
 
-    // Listen for login/logout changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        const role = session.user.user_metadata?.role;
-        if (role === 'Advisor') setScreen('advisor');
-        else if (role === 'Student') setScreen('student');
-        else if (role === 'Hotel Staff') setScreen('staff');
-      } else {
-        setScreen('home');
+  const placeGuest = (guestId: number, roomId: number | null) => {
+    setAssignments((prev) => {
+      const rest = prev.filter((a) => a.guest_id !== guestId);
+      return roomId === null ? rest : [...rest, { guest_id: guestId, room_id: roomId }];
+    });
+    setEditingGuestId(null);
+  };
+
+  const handleAutoAssign = () => {
+    const result = autoAssignGuests(guests, rooms, assignments, separate);
+    setAssignments(result.assignments);
+    if (result.unassignedGuestIds.length) {
+      showAlert('Some people still need rooms', `${result.unassignedGuestIds.length} people didn't fit. Ask the hotel to add rooms that match their school and gender.`);
+    }
+  };
+
+  const changed = assignments.filter((a) => !saved.some((s) => s.guest_id === a.guest_id && s.room_id === a.room_id));
+  const removed = saved.filter((s) => !assignments.some((a) => a.guest_id === s.guest_id));
+  const pendingCount = changed.length + removed.length;
+
+  const handleSave = async () => {
+    if (pendingCount === 0) return;
+    setSaving(true);
+    const roomNumber = new Map(rooms.map((room) => [room.id, room.room_number]));
+    if (removed.length) {
+      const { error } = await supabase.from('assignments').delete().in('guest_id', removed.map((r) => r.guest_id));
+      if (error) {
+        setSaving(false);
+        showAlert('Error saving assignments', errorMessage(error));
+        return;
       }
+    }
+    if (changed.length) {
+      const { error } = await supabase
+        .from('assignments')
+        .upsert(changed.map((a) => ({ trip_id: trip.id, guest_id: a.guest_id, room_id: a.room_id })), { onConflict: 'guest_id' });
+      if (error) {
+        setSaving(false);
+        showAlert('Error saving assignments', errorMessage(error));
+        return;
+      }
+    }
+    const before = new Map(saved.map((a) => [a.guest_id, a.room_id]));
+    const person = (id: number) => guests.find((g) => g.id === id) ?? { id, legal_name: 'Unknown' };
+    await logRoomChanges(trip.id, 'Advisor', [
+      ...changed.map((a) => ({
+        guest: person(a.guest_id),
+        action: (before.has(a.guest_id) ? 'moved' : 'assigned') as 'moved' | 'assigned',
+        fromRoom: before.has(a.guest_id) ? roomNumber.get(before.get(a.guest_id)!) : null,
+        toRoom: roomNumber.get(a.room_id),
+      })),
+      ...removed.map((r) => ({ guest: person(r.guest_id), action: 'removed' as const, fromRoom: roomNumber.get(r.room_id) })),
+    ]);
+    await Promise.all([
+      ...changed.map((a) => notify(trip.id, 'guest', 'Room assigned', `Your advisor placed you in room ${roomNumber.get(a.room_id) ?? ''}.`, a.guest_id, 'rooms')),
+      ...removed.map((r) => notify(trip.id, 'guest', 'Room removed', `Your advisor took you out of room ${roomNumber.get(r.room_id) ?? ''}. Pick a new room.`, r.guest_id, 'rooms')),
+    ]);
+    setSaving(false);
+    showAlert('Saved', `${pendingCount} change${pendingCount === 1 ? '' : 's'} saved and students notified.`);
+    await load();
+  };
+
+  const status = (guestId: number) => {
+    const now = roomIdOf(guestId);
+    const before = saved.find((s) => s.guest_id === guestId)?.room_id ?? null;
+    return now === before ? '' : now === null ? '  ← removed' : before === null ? '  ← new' : '  ← moved';
+  };
+
+  // The room picker shown under whichever person is being edited.
+  const picker = (guest: Guest) => {
+    const options = roomsFor(guest);
+    return (
+      <View style={{ marginTop: 8 }}>
+        <Text style={styles.mutedText}>{options.length ? (roomIdOf(guest.id) === null ? 'Put in:' : 'Move to:') : 'No other room fits this person (school, gender, and free beds).'}</Text>
+        <View style={styles.actionRow}>
+          {options.map((room) => (
+            <SmallButton
+              key={room.id}
+              text={`${room.room_number} (${roomGuests(room.id).length}/${room.capacity})`}
+              onPress={() => placeGuest(guest.id, room.id)}
+            />
+          ))}
+          {roomIdOf(guest.id) !== null && <SmallButton text="Remove from room" secondary onPress={() => placeGuest(guest.id, null)} />}
+          <SmallButton text="Cancel" secondary onPress={() => setEditingGuestId(null)} />
+        </View>
+      </View>
+    );
+  };
+
+  const personRow = (guest: Guest) => (
+    <View key={guest.id} style={{ marginBottom: 6 }}>
+      <View style={styles.rowBetween}>
+        <Text style={[styles.cardText, { flex: 1 }]}>
+          {`• ${guest.legal_name}${guest.is_chaperone ? ' (chaperone)' : ''}${status(guest.id)}`}
+        </Text>
+        {!locked && editingGuestId !== guest.id && (
+          <SmallButton text={roomIdOf(guest.id) === null ? 'Assign' : 'Move'} secondary onPress={() => setEditingGuestId(guest.id)} />
+        )}
+      </View>
+      {editingGuestId === guest.id && picker(guest)}
+    </View>
+  );
+
+  return (
+    <Page>
+      <BackButton onPress={onBack} />
+      <Text style={styles.pageTitle}>Assign Rooms</Text>
+      <Text style={styles.pageSubtitle}>Students pick their own rooms. You can place anyone by hand, or auto-fill the empty beds.</Text>
+
+      {locked ? (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>Rooms are locked. Unlock from the trip dashboard to make changes.</Text>
+        </View>
+      ) : (
+        <>
+          <TouchableOpacity style={styles.button} onPress={handleAutoAssign} disabled={loading || rooms.length === 0 || unassigned.length === 0}>
+            <Text style={styles.buttonText}>{`Auto-Assign ${unassigned.length} Without a Room`}</Text>
+          </TouchableOpacity>
+          {pendingCount > 0 && (
+            <View style={styles.actionRow}>
+              <TouchableOpacity style={[styles.button, { flex: 1 }]} onPress={handleSave} disabled={saving}>
+                <Text style={styles.buttonText}>{saving ? 'Saving...' : `Save ${pendingCount} Change${pendingCount === 1 ? '' : 's'}`}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.secondaryButton, { flex: 1 }]} onPress={() => setAssignments(saved)} disabled={saving}>
+                <Text style={styles.secondaryButtonText}>Undo</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </>
+      )}
+
+      {loading ? (
+        <Text style={styles.normalText}>Loading...</Text>
+      ) : (
+        <>
+          <Text style={styles.sectionTitle}>{`No room (${unassigned.length})`}</Text>
+          {unassigned.length === 0 ? (
+            <Text style={styles.normalText}>Everyone has a room.</Text>
+          ) : (
+            <View style={styles.card}>
+              {unassigned.map((guest) => (
+                <View key={guest.id}>
+                  {personRow(guest)}
+                  {editingGuestId !== guest.id && <Text style={[styles.mutedText, { marginTop: -4, marginLeft: 12 }]}>{`${guest.gender ?? 'gender not set'} · ${guest.school}`}</Text>}
+                </View>
+              ))}
+            </View>
+          )}
+
+          <Text style={styles.sectionTitle}>By room</Text>
+          {rooms.length === 0 ? (
+            <Text style={styles.normalText}>No rooms yet. The hotel adds them from their dashboard, or add them under Rooms.</Text>
+          ) : (
+            rooms.map((room) => (
+              <View key={room.id} style={styles.card}>
+                <Text style={styles.cardTitle}>{`Room ${room.room_number}`}</Text>
+                <Text style={styles.mutedText}>{`${room.room_type} · ${room.gender ?? 'Any gender'} · ${roomGuests(room.id).length} of ${room.capacity}`}</Text>
+                {roomGuests(room.id).length === 0 ? <Text style={styles.mutedText}>Empty</Text> : roomGuests(room.id).map(personRow)}
+              </View>
+            ))
+          )}
+        </>
+      )}
+    </Page>
+  );
+}
+
+// Web: use the Inter font (phones already use a clean system font).
+function useWebFont() {
+  useEffect(() => {
+    if (Platform.OS !== 'web' || document.getElementById('groupstay-font')) return;
+    const link = document.createElement('link');
+    link.id = 'groupstay-font';
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap';
+    document.head.appendChild(link);
+    const style = document.createElement('style');
+    // Icons are text in an icon font, so leave anything styled with an icon font alone.
+    style.textContent =
+      "body *:not([style*='icons']) { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; } body { background: #F3F5FA; }";
+    document.head.appendChild(style);
+  }, []);
+}
+
+export default function App() {
+  useWebFont();
+  const [screen, setScreen] = useState<Screen>('home');
+  const [session, setSession] = useState<Session | null>(null);
+  const [roleHint, setRoleHint] = useState<Role | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showDisplay, setShowDisplay] = useState(false);
+  // A join link (?join=CODE) opens the student's join screen with the code filled in.
+  const [pendingJoin, setPendingJoin] = useState<string | null>(() => takeJoinCodeFromUrl());
+  const [, setThemeVersion] = useState(appearance.version);
+
+  useEffect(() => {
+    // Re-render everything when the theme or text size changes.
+    const stop = onAppearanceChange(() => {
+      setThemeVersion(appearance.version);
+      if (Platform.OS === 'web') document.body.style.background = colors.bg;
     });
 
-    return () => subscription.unsubscribe();
+    // Load display settings, then restore a saved login and go straight to the dashboard.
+    loadAppearance().then(() =>
+      supabase.auth.getSession().then(({ data: { session: saved } }) => {
+        setSession(saved);
+        if (saved?.user) setScreen('dashboard');
+        else if (pendingJoin) {
+          setRoleHint('Student');
+          setScreen('login');
+        }
+        setLoading(false);
+      }),
+    );
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, next) => {
+      setSession(next);
+      if (event === 'SIGNED_IN') setScreen((prev) => (prev === 'login' || prev === 'signup' ? 'dashboard' : prev));
+      if (event === 'SIGNED_OUT') setScreen('home');
+    });
+
+    return () => {
+      subscription.unsubscribe();
+      stop();
+    };
   }, []);
 
-  if (loading) return null;
-  if (screen === 'advisor') {
-    return <AdvisorScreen onBack={() => setScreen('home')} />;
-  }
+  const profile = profileFromSession(session);
+  const openDisplay = () => setShowDisplay(true);
+  const logout = async () => {
+    await supabase.auth.signOut();
+    setScreen('home');
+  };
+  const goHome = () => setScreen('home');
 
-  if (screen === 'student') {
-    return <StudentScreen onBack={() => setScreen('home')} />;
-  }
-
-  if (screen === 'staff') {
-    return <StaffScreen onBack={() => setScreen('home')} />;
-  }
-if (screen === 'login') {
-  return <LoginScreen navigation={{ navigate: (s: string) => setScreen(s as Screen) }} />;
-}
-if (screen === 'signup') {
-  return <SignupScreen navigation={{ navigate: (s: string) => setScreen(s as Screen) }} />;
-}
-  return <HomeScreen onSelect={(selectedScreen) => {
-  if (selectedScreen === 'advisor' || selectedScreen === 'staff') {
-    setScreen('login' as Screen);
+  let content = null;
+  if (loading) {
+    content = null;
+  } else if (showDisplay) {
+    content = <DisplaySettingsScreen onBack={() => setShowDisplay(false)} />;
+  } else if (screen === 'login') {
+    content = <LoginScreen roleHint={roleHint} joinCode={pendingJoin} onSignup={() => setScreen('signup')} onBack={goHome} />;
+  } else if (screen === 'signup') {
+    content = <SignupScreen roleHint={roleHint} onLogin={() => setScreen('login')} />;
+  } else if (screen === 'dashboard' && profile) {
+    if (profile.role === 'Advisor') content = <AdvisorScreen profile={profile} onBack={goHome} onLogout={logout} onOpenDisplay={openDisplay} />;
+    else if (profile.role === 'Student' || profile.role === 'Chaperone') {
+      content = (
+        <StudentHome
+          profile={profile}
+          onBack={goHome}
+          onLogout={logout}
+          onOpenDisplay={openDisplay}
+          joinCode={pendingJoin}
+          onJoinCodeUsed={() => setPendingJoin(null)}
+        />
+      );
+    } else if (profile.role === 'Hotel Staff') content = <StaffHome profile={profile} onBack={goHome} onLogout={logout} onOpenDisplay={openDisplay} />;
+    else if (profile.role === 'Parent') content = <ParentHome profile={profile} onBack={goHome} onLogout={logout} onOpenDisplay={openDisplay} />;
+    else {
+      content = (
+        <Page>
+          <BackButton onPress={goHome} />
+          <Text style={styles.pageTitle}>No role set</Text>
+          <Text style={styles.pageSubtitle}>This account has no role. Log out and sign up again with a role.</Text>
+          <TouchableOpacity style={styles.secondaryButton} onPress={logout}>
+            <Text style={styles.secondaryButtonText}>Log Out</Text>
+          </TouchableOpacity>
+        </Page>
+      );
+    }
   } else {
-    setScreen(selectedScreen);
+    content = (
+      <HomeScreen
+        profile={profile}
+        onDashboard={() => setScreen('dashboard')}
+        onLogout={logout}
+        onOpenDisplay={openDisplay}
+        onSelect={(role) => {
+          setRoleHint(role);
+          setScreen('login');
+        }}
+      />
+    );
   }
-}} />;
-}
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    paddingTop: 60,
-    paddingHorizontal: 24,
-    justifyContent: 'center',
-  },
-  keyboardAvoidingContainer: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-  },
-  scrollView: {
-    backgroundColor: '#ffffff',
-  },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingTop: 60,
-    paddingHorizontal: 24,
-  },
-  title: {
-    fontSize: 40,
-    fontWeight: '700',
-    color: '#1A56A0',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 18,
-    color: '#333333',
-    textAlign: 'center',
-    marginBottom: 32,
-  },
-  buttonsContainer: {
-    width: '100%',
-  },
-  button: {
-    backgroundColor: '#1A56A0',
-    borderRadius: 10,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  input: {
-    width: '100%',
-    backgroundColor: '#F3F4F6',
-    borderColor: '#E5E7EB',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: '#111827',
-    marginBottom: 16,
-  },
-  backButton: {
-    marginTop: 12,
-    alignItems: 'center',
-  },
-  backText: {
-    color: '#1A56A0',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  pageContent: {
-    paddingBottom: 40,
-  },
-  sectionTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#1A56A0',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  roomManager: {
-    marginTop: 24,
-    width: '100%',
-  },
-  roomTypeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  roomTypeButton: {
-    flex: 1,
-    backgroundColor: '#E5E7EB',
-    borderRadius: 10,
-    paddingVertical: 12,
-    marginRight: 8,
-    alignItems: 'center',
-  },
-  roomTypeSelected: {
-    backgroundColor: '#1A56A0',
-  },
-  roomTypeText: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  roomTypeSelectedText: {
-    color: '#ffffff',
-  },
-  roomList: {
-    marginTop: 16,
-    width: '100%',
-  },
-  roomRow: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 12,
-  },
-  secondaryButton: {
-    backgroundColor: '#E5E7EB',
-    borderRadius: 10,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  secondaryButtonText: {
-    color: '#1F2937',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  guestListContainer: {
-    width: '100%',
-    marginTop: 16,
-  },
-  guestListContent: {
-    paddingBottom: 24,
-  },
-  assignmentPanel: {
-    marginTop: 16,
-    width: '100%',
-  },
-  contentContainer: {
-    paddingBottom: 40,
-  },
-  guestRow: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 12,
-  },
-  guestName: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 4,
-  },
-  optionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  optionButton: {
-    flex: 1,
-    minWidth: '45%',
-    backgroundColor: '#E5E7EB',
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    marginBottom: 12,
-    marginRight: 8,
-    alignItems: 'center',
-  },
-  optionButtonSelected: {
-    backgroundColor: '#1A56A0',
-  },
-  optionButtonText: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  optionButtonTextSelected: {
-    color: '#ffffff',
-  },
-  toggleRow: {
-    marginBottom: 24,
-  },
-  toggleButton: {
-    backgroundColor: '#E5E7EB',
-    borderRadius: 10,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-  },
-  toggleButtonSelected: {
-    backgroundColor: '#1A56A0',
-  },
-  toggleText: {
-    color: '#111827',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  bigText: {
-    fontSize: 36,
-    fontWeight: '700',
-    color: '#111827',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  bigBlueText: {
-    fontSize: 36,
-    fontWeight: '700',
-    color: '#1A56A0',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  normalText: {
-    fontSize: 16,
-    color: '#333333',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  statsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginVertical: 24,
-  },
-  statBox: {
-    flex: 1,
-    backgroundColor: '#F8FAFC',
-    borderRadius: 10,
-    padding: 16,
-    marginHorizontal: 4,
-    alignItems: 'center',
-  },
-  statNumber: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: '#1A56A0',
-    marginBottom: 4,
-  },
-  statLabel: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '600',
-  },
-  buttonsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginBottom: 24,
-  },
-  gridButton: {
-    width: '48%',
-    backgroundColor: '#1A56A0',
-    borderRadius: 10,
-    paddingVertical: 20,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  gridButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  threadSelector: {
-    maxHeight: 50,
-    marginBottom: 16,
-  },
-  threadTab: {
-    backgroundColor: '#E5E7EB',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginRight: 8,
-    alignItems: 'center',
-  },
-  threadTabSelected: {
-    backgroundColor: '#1A56A0',
-  },
-  threadTabText: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  threadTabTextSelected: {
-    color: '#ffffff',
-  },
-  messagesContainer: {
-    flex: 1,
-    width: '100%',
-  },
-  messagesContent: {
-    paddingBottom: 16,
-  },
-  messageRow: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
-  },
-  messageSender: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#1A56A0',
-    marginBottom: 4,
-  },
-  messageContent: {
-    fontSize: 16,
-    color: '#111827',
-    marginBottom: 4,
-  },
-  messageTime: {
-    fontSize: 12,
-    color: '#6B7280',
-  },
-  messageInputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  messageInput: {
-    flex: 1,
-    backgroundColor: '#F3F4F6',
-    borderColor: '#E5E7EB',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 16,
-    color: '#111827',
-    marginRight: 8,
-    maxHeight: 80,
-  },
-  sendButton: {
-    backgroundColor: '#1A56A0',
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  sendButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-});
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      {content}
+      <AlertHost />
+    </View>
+  );
+}
